@@ -1,0 +1,536 @@
+/**
+ * YouTube Music adapter. Python uses ytmusicapi; there is no JS port that runs in a WebView, so this
+ * calls the same unauthenticated InnerTube endpoints (search, next, browse) and ports the parsers it
+ * needs from ytmusicapi (parse_song_runs, parse_song_flat, parse_watch_track, parse_mixed_content).
+ * Behaviour mirrors providers.py YouTubeMusic. Verified against responses recorded live from
+ * music.youtube.com (see fixtures/ytm-*.json), trimmed to the first few items.
+ */
+import { BudgetExceeded, Cancelled, type CancelToken, type Http, type Meter } from './net';
+import { fold, matchRecordings } from './identity';
+import { makeTrack, release, type Track } from './track';
+import { cached, NeedsChoice, ProviderError } from './deezer';
+import type { Store } from './store';
+
+type Json = Record<string, any>;
+export interface Ctx {
+  meter?: Meter;
+  token?: CancelToken;
+  /** Bounded passive full-song retries must bypass stale search misses too. */
+  refresh?: boolean;
+}
+
+const API = 'https://music.youtube.com/youtubei/v1/';
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:88.0) Gecko/20100101 Firefox/88.0';
+/** ytmusicapi get_search_params('songs'). */
+const SONGS_FILTER = 'EgWKAQIIAWoMEA4QChADEAQQCRAF';
+/**
+ * ytmusicapi get_search_params('videos'). YouTube Music's songs catalogue is not all of YouTube:
+ * game soundtracks and small-creator tracks are uploaded as videos, and a songs-only search cannot
+ * see them at any number of retries (SOURCE-VIDEO-001).
+ */
+const VIDEOS_FILTER = 'EgWKAQIQAWoMEA4QChADEAQQCRAF';
+/** ALBUM-SEARCH-002: the albums tab of a search (ytmusicapi's filter 'albums'). */
+export const ALBUMS_FILTER = 'EgWKAQIYAWoMEA4QChADEAQQCRAF';
+/** A YouTube Music album page id. */
+export const YT_ALBUM = /^MPREb_[A-Za-z0-9_-]{6,40}$/;
+/** ytmusicapi's search filter for artists. */
+const ARTISTS_FILTER = 'EgWKAQIgAWoMEA4QChADEAQQCRAF';
+const YT_ID = /^[A-Za-z0-9_-]{11}$/;
+const MAX_BYTES = 4_000_000;
+/** FEATURES-ALL-002: what a songs search page is read from, for both shapes a page comes in. */
+const SONG_ROW_PARTS = 'continuations,contents.musicResponsiveListItemRenderer(flexColumns,fixedColumns,playlistItemData,overlay.musicItemThumbnailOverlayRenderer.content.musicPlayButtonRenderer.playNavigationEndpoint.watchEndpoint,thumbnail,badges)';
+/** How long to wait before asking again after a "slow down" answer, in ms. */
+const SLOW_DOWN_WAITS = [700, 1500];
+/** A search read page after page meets more of them, and nothing is waiting on it: one wait more. */
+const PAGING_WAITS = [700, 1500, 3000];
+/** DISCOGRAPHY-MORE-001: what a release in a discography grid is read from. */
+const GRID_PARTS = `&prettyPrint=false&fields=${encodeURIComponent(
+  'contents.singleColumnBrowseResultsRenderer.tabs.tabRenderer.content.sectionListRenderer.contents.gridRenderer.items.musicTwoRowItemRenderer(title,subtitle,navigationEndpoint,thumbnailRenderer)',
+)}`;
+const SONG_PAGE_PARTS = `&prettyPrint=false&fields=${encodeURIComponent(
+  `contents.tabbedSearchResultsRenderer.tabs.tabRenderer.content.sectionListRenderer.contents.musicShelfRenderer(${SONG_ROW_PARTS}),continuationContents.musicShelfContinuation(${SONG_ROW_PARTS})`,
+)}`;
+const LIST_BYTES = 12_000_000;
+
+export interface Artist {
+  name: string;
+  id: string | null;
+}
+/** What ytmusicapi hands back for one song, after parsing. */
+export interface YtItem {
+  videoId: string;
+  title: string;
+  artists: Artist[];
+  album: Artist | null;
+  duration_seconds: number | null;
+  year: string | null;
+  thumbnails: { url: string }[];
+  videoType: string;
+  isExplicit: boolean | null;
+}
+
+// ---- ytmusicapi parsers ---------------------------------------------------------------------
+
+/** Walk `path` through `o`; undefined when any step is missing (ytmusicapi nav(..., none_if_absent)). */
+const nav = (o: any, path: (string | number)[]): any => path.reduce((a, k) => (a == null ? undefined : a[k]), o);
+
+const VIEWS_PREFIX = /^\D*?[\s:\uff1a\u200e-\u200f\u202a-\u202e]/;
+
+function parseViews(text: string): string | null {
+  let prefixed = false;
+  if (!/[a-zA-Z]/.test(text)) {
+    const next = text.replace(VIEWS_PREFIX, '');
+    prefixed = next !== text;
+    text = next;
+  }
+  if (!/^\d/.test(text)) return null;
+  // A bare ASCII token like "2Pac" is an artist, not a view count with a stripped word.
+  if (!prefixed && /^[\x00-\x7f]*$/.test(text) && !text.includes(' ')) return null;
+  return text.split(' ')[0]!.split('\u00a0').slice(0, 2).join('\u00a0');
+}
+
+type Run = { text: string; navigationEndpoint?: Json };
+type Parsed =
+  | { type: 'album' | 'artist'; data: Artist }
+  | { type: 'duration' | 'year' | 'views'; data: string };
+
+function parseSongRun(run: Run): Parsed {
+  const text = run.text;
+  if (run.navigationEndpoint) {
+    const id: string | null = nav(run, ['navigationEndpoint', 'browseEndpoint', 'browseId']) ?? null;
+    const item = { name: text, id };
+    return id && (id.startsWith('MPRE') || id.includes('release_detail')) ? { type: 'album', data: item } : { type: 'artist', data: item };
+  }
+  if (/^(\d+:)*\d+:\d+$/.test(text)) return { type: 'duration', data: text };
+  if (/^\d{4}$/.test(text)) return { type: 'year', data: text };
+  const v = parseViews(text);
+  if (v !== null) return { type: 'views', data: v };
+  return { type: 'artist', data: { name: text, id: null } };
+}
+
+export function parseDuration(d: string | null | undefined): number | null {
+  if (!d || !d.trim()) return null;
+  const parts = d.trim().split(':');
+  if (parts.some((p) => !/^\d+$/.test(p))) return null;
+  return parts.reverse().slice(0, 3).reduce((s, p, i) => s + Number(p) * [1, 60, 3600][i]!, 0);
+}
+
+const isDot = (r: Run | undefined) => !!r && r.text === ' • ' && !r.navigationEndpoint;
+
+interface SongRuns {
+  artists?: Artist[];
+  album?: Artist;
+  duration?: string;
+  duration_seconds?: number | null;
+  year?: string;
+  views?: string;
+}
+
+export function parseSongRuns(runs: Run[], skipTypeSpec = false): SongRuns {
+  const out: SongRuns = {};
+  // The unlinked first run ("Song", "Single") is a type label, not an artist.
+  if (
+    skipTypeSpec &&
+    runs.length > 2 &&
+    !runs[0]!.navigationEndpoint &&
+    parseSongRun(runs[0]!).type === 'artist' &&
+    isDot(runs[1]) &&
+    ['artist', 'duration', 'views', 'year'].includes(parseSongRun(runs[2]!).type)
+  ) {
+    runs = runs.slice(2);
+  }
+  runs.forEach((run, i) => {
+    if (i % 2) return; // odd items are separators
+    const p = parseSongRun(run);
+    switch (p.type) {
+      case 'album': out.album = p.data; break;
+      case 'artist': (out.artists ??= []).push(p.data); break;
+      case 'views': out.views = p.data; break;
+      case 'duration': out.duration = p.data; out.duration_seconds = parseDuration(p.data); break;
+      case 'year': out.year = p.data; break;
+    }
+  });
+  return out;
+}
+
+const flexRuns = (li: Json, i: number): Run[] | undefined => li.flexColumns?.[i]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs;
+const PLAY = ['overlay', 'musicItemThumbnailOverlayRenderer', 'content', 'musicPlayButtonRenderer'];
+const VIDEO_TYPE = ['watchEndpoint', 'watchEndpointMusicSupportedConfigs', 'watchEndpointMusicConfig', 'musicVideoType'];
+
+/** musicResponsiveListItemRenderer -> song (ytmusicapi parse_song_flat). Null when it has no video. */
+export function parseSongFlat(li: Json): YtItem | null {
+  const c0 = flexRuns(li, 0);
+  const play = nav(li, [...PLAY, 'playNavigationEndpoint']);
+  const videoId: string | undefined = nav(c0?.[0], ['navigationEndpoint', 'watchEndpoint', 'videoId']) ?? nav(play, ['watchEndpoint', 'videoId']);
+  if (!videoId) return null;
+  const runs = flexRuns(li, 1) ?? [];
+  const sr = parseSongRuns(runs, true);
+  const thumbs: { url: string }[] = nav(li, ['thumbnail', 'musicThumbnailRenderer', 'thumbnail', 'thumbnails']) ?? [];
+  return {
+    videoId,
+    title: c0?.[0]?.text ?? '',
+    artists: sr.artists ?? [],
+    album: sr.album ?? (li.flexColumns?.length > 2 ? albumColumn(li) : null),
+    duration_seconds: sr.duration_seconds ?? fixedDuration(li),
+    year: sr.year ?? null,
+    thumbnails: thumbs,
+    videoType: nav(play, VIDEO_TYPE) ?? '',
+    isExplicit: nav(li, ['badges', 0, 'musicInlineBadgeRenderer', 'accessibilityData', 'accessibilityData', 'label']) != null,
+  };
+}
+
+function albumColumn(li: Json): Artist | null {
+  const r = flexRuns(li, 2)?.[0];
+  return r ? { name: r.text, id: nav(r, ['navigationEndpoint', 'browseEndpoint', 'browseId']) ?? null } : null;
+}
+
+function fixedDuration(li: Json): number | null {
+  const t = nav(li, ['fixedColumns', 0, 'musicResponsiveListItemFixedColumnRenderer', 'text', 'runs', 0, 'text']);
+  return parseDuration(t);
+}
+
+/** playlistPanelVideoRenderer -> song (ytmusicapi parse_watch_track). */
+export function parseWatchTrack(d: Json): YtItem {
+  const sr = parseSongRuns(nav(d, ['longBylineText', 'runs']) ?? []);
+  const len: string | undefined = nav(d, ['lengthText', 'runs', 0, 'text']);
+  return {
+    videoId: d.videoId,
+    title: nav(d, ['title', 'runs', 0, 'text']) ?? '',
+    artists: sr.artists ?? [],
+    album: sr.album ?? null,
+    duration_seconds: sr.duration_seconds ?? parseDuration(len),
+    year: sr.year ?? null,
+    thumbnails: nav(d, ['thumbnail', 'thumbnails']) ?? [],
+    videoType: nav(d, ['navigationEndpoint', ...VIDEO_TYPE]) ?? '',
+    isExplicit: null,
+  };
+}
+
+/** The watch panel: playable tracks plus the browse id of its "Related" tab. */
+export function parseWatch(resp: Json): { tracks: YtItem[]; related: string | null } {
+  const wn = nav(resp, ['contents', 'singleColumnMusicWatchNextResultsRenderer', 'tabbedRenderer', 'watchNextTabbedResultsRenderer']);
+  if (!wn) throw new ProviderError('YouTube Music returned nothing for that video.');
+  let related: string | null = null;
+  for (const tab of wn.tabs ?? []) {
+    if (tab.tabRenderer?.unselectable) continue;
+    const be = nav(tab, ['tabRenderer', 'endpoint', 'browseEndpoint']);
+    if (nav(be, ['browseEndpointContextSupportedConfigs', 'browseEndpointContextMusicConfig', 'pageType']) === 'MUSIC_PAGE_TYPE_TRACK_RELATED') related = be.browseId;
+  }
+  const panel = nav(wn, ['tabs', 0, 'tabRenderer', 'content', 'musicQueueRenderer', 'content', 'playlistPanelRenderer', 'contents']);
+  if (!panel) throw new ProviderError('YouTube Music returned nothing for that video.');
+  const tracks: YtItem[] = [];
+  for (let r of panel as Json[]) {
+    if (r.playlistPanelVideoWrapperRenderer) r = r.playlistPanelVideoWrapperRenderer.primaryRenderer;
+    const d = r?.playlistPanelVideoRenderer;
+    if (!d || d.unplayableText) continue;
+    tracks.push(parseWatchTrack(d));
+  }
+  return { tracks, related };
+}
+
+/** The "Related" tab: "You might also like" songs and "Similar artists". */
+export function parseRelated(resp: Json): { songs: YtItem[]; artists: { id: string | null; name: string }[] } {
+  const out = { songs: [] as YtItem[], artists: [] as { id: string | null; name: string }[] };
+  const sections: Json[] = nav(resp, ['contents', 'sectionListRenderer', 'contents']) ?? [];
+  for (const s of sections) {
+    const shelf = s.musicCarouselShelfRenderer;
+    if (!shelf) continue;
+    const title = String(nav(shelf, ['header', 'musicCarouselShelfBasicHeaderRenderer', 'title', 'runs', 0, 'text']) ?? '').toLowerCase();
+    const contents: Json[] = shelf.contents ?? [];
+    if (title === 'you might also like') {
+      for (const c of contents) {
+        const song = c.musicResponsiveListItemRenderer && parseSongFlat(c.musicResponsiveListItemRenderer);
+        if (song) out.songs.push(song);
+      }
+    } else if (title === 'similar artists') {
+      for (const c of contents) {
+        const d = c.musicTwoRowItemRenderer;
+        const name = nav(d, ['title', 'runs', 0, 'text']);
+        const be = nav(d, ['title', 'runs', 0, 'navigationEndpoint', 'browseEndpoint']);
+        if (name) out.artists.push({ id: be?.browseId ?? null, name });
+      }
+    }
+  }
+  return out;
+}
+
+export function parseSearchSongs(resp: Json): YtItem[] {
+  const tabs: Json[] = nav(resp, ['contents', 'tabbedSearchResultsRenderer', 'tabs']) ?? [];
+  const sections: Json[] = nav(tabs, [0, 'tabRenderer', 'content', 'sectionListRenderer', 'contents']) ?? [];
+  const out: YtItem[] = [];
+  for (const s of sections) {
+    for (const c of s.musicShelfRenderer?.contents ?? []) {
+      const song = c.musicResponsiveListItemRenderer && parseSongFlat(c.musicResponsiveListItemRenderer);
+      if (song) out.push(song);
+    }
+  }
+  return out;
+}
+
+/**
+ * FEATURES-ALL-002: one page of a songs search, first or later, with the token of the page after it.
+ * A first page holds its rows in the search tab's shelf; a later one in a shelf continuation. Each
+ * row keeps every artist it links, which is how a song another artist leads is told from a namesake.
+ */
+export function parseSearchSongsPage(resp: Json): { items: YtItem[]; next: string | null } {
+  const tabs: Json[] = nav(resp, ['contents', 'tabbedSearchResultsRenderer', 'tabs']) ?? [];
+  const sections: Json[] = nav(tabs, [0, 'tabRenderer', 'content', 'sectionListRenderer', 'contents']) ?? [];
+  const shelf: Json | undefined = sections.map((s) => s.musicShelfRenderer).find(Boolean) ?? nav(resp, ['continuationContents', 'musicShelfContinuation']);
+  const items: YtItem[] = [];
+  for (const c of shelf?.contents ?? []) {
+    const song = c.musicResponsiveListItemRenderer && parseSongFlat(c.musicResponsiveListItemRenderer);
+    if (song) items.push(song);
+  }
+  const next = nav(shelf, ['continuations', 0, 'nextContinuationData', 'continuation']);
+  return { items, next: typeof next === 'string' && next ? next : null };
+}
+
+export function parsePlaylist(resp: Json): { title: string; trackCount: number | null; tracks: YtItem[] } {
+  const two = nav(resp, ['contents', 'twoColumnBrowseResultsRenderer']);
+  const shelf = nav(two, ['secondaryContents', 'sectionListRenderer', 'contents', 0, 'musicPlaylistShelfRenderer']);
+  if (!shelf) throw new ProviderError('That playlist is private, empty or not available without signing in.');
+  const head = nav(two, ['tabs', 0, 'tabRenderer', 'content', 'sectionListRenderer', 'contents', 0, 'musicResponsiveHeaderRenderer']);
+  const subtitle = ((nav(head, ['secondSubtitle', 'runs']) ?? []) as Run[]).map((r) => r.text).join('');
+  const count = /([\d,]+) tracks?/.exec(subtitle);
+  const tracks: YtItem[] = [];
+  for (const c of shelf.contents ?? []) {
+    const song = c.musicResponsiveListItemRenderer && parseSongFlat(c.musicResponsiveListItemRenderer);
+    if (song) tracks.push(song);
+  }
+  return { title: nav(head, ['title', 'runs', 0, 'text']) ?? '', trackCount: count ? Number(count[1]!.replace(/,/g, '')) : null, tracks };
+}
+
+// ---- adapter --------------------------------------------------------------------------------
+
+const H = 3600;
+const DAY = 86400;
+
+export class YouTubeMusic {
+  readonly name = 'ytmusic';
+  readonly label = 'YouTube Music';
+
+  constructor(private readonly http: Http, private readonly store?: Store) {}
+
+  /**
+   * OPEN-FLOW-001. Measured 2026-11-16: asked a number of things in a row, YouTube Music answers one
+   * of them 403 ("Sorry...") now and then, and the same request a moment later answers. That is
+   * "slow down", not "no": the request waits and is asked again, a few times at most, so one such
+   * answer no longer costs an artist page its YouTube Music half or ends a search part-way.
+   */
+  private async post(endpoint: string, body: Json, c: Ctx, maxBytes = MAX_BYTES, query = '', waits: readonly number[] = SLOW_DOWN_WAITS): Promise<Json> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.postOnce(endpoint, body, c, maxBytes, query);
+      } catch (e) {
+        const wait = /HTTP 403\b/.test(String((e as Error)?.message ?? '')) ? waits[attempt] : undefined;
+        if (wait === undefined) throw e;
+        c.token?.check();
+        await this.http.wait(wait);
+      }
+    }
+  }
+
+  private async postOnce(endpoint: string, body: Json, c: Ctx, maxBytes: number, query: string): Promise<Json> {
+    const context = { context: { client: { clientName: 'WEB_REMIX', clientVersion: `1.${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.01.00` }, user: {} } };
+    const o: Parameters<Http['getJson']>[1] = {
+      category: 'metadata',
+      maxBytes,
+      method: 'POST',
+      body: JSON.stringify({ ...body, ...context }),
+      headers: { 'user-agent': UA, 'content-type': 'application/json', origin: 'https://music.youtube.com' },
+    };
+    if (c.meter) o.meter = c.meter;
+    if (c.token) o.token = c.token;
+    return this.http.getJson<Json>(`${API}${endpoint}?alt=json${query}`, o);
+  }
+
+  private watch(videoId: string, limit: number, c: Ctx, radio = false) {
+    const body: Json = { enablePersistentPlaylistPanel: true, isAudioOnly: true, tunerSettingValue: 'AUTOMIX_SETTING_NORMAL', videoId, playlistId: `RDAMVM${videoId}` };
+    if (radio) body['params'] = 'wAEB';
+    else body['watchEndpointMusicSupportedConfigs'] = { watchEndpointMusicConfig: { hasPersistentPlaylistPanel: true, musicVideoType: 'MUSIC_VIDEO_TYPE_ATV' } };
+    return this.post('next', body, c).then(parseWatch).then((w) => ({ ...w, tracks: w.tracks.slice(0, Math.max(1, limit)) }));
+  }
+
+  toTrack(x: YtItem, kind?: string): Track {
+    let arts = x.artists.map((a) => a.name).filter(Boolean);
+    arts = arts.filter((a) => !/^[\d.,]+[KMB]? (views|plays)$/.test(a));
+    const thumb = x.thumbnails.length ? x.thumbnails[x.thumbnails.length - 1]!.url : null;
+    const art = thumb && thumb.includes('=w') ? thumb.replace(/=w\d+-h\d+/, '=w240-h240') : thumb;
+    const vtype = x.videoType || '';
+    const rel = x.year ? release(x.year, 'release', 'YouTube Music') : null;
+    return makeTrack({
+      provider: 'ytmusic', platformId: x.videoId, title: x.title || '', artists: arts.length ? arts : ['Unknown artist'],
+      album: x.album?.name ?? null, duration: x.duration_seconds, artwork: art,
+      url: `https://music.youtube.com/watch?v=${x.videoId}`, rel,
+      artistIds: { ytmusic: x.artists.find((a) => a.id)?.id ?? '' },
+      explicit: x.isExplicit, kind: kind ?? (['MUSIC_VIDEO_TYPE_ATV', 'MUSIC_VIDEO_TYPE_OMV', ''].includes(vtype) ? 'song' : 'video'),
+      // ALBUM-SEARCH-002: a song that names its album page can open that album itself.
+      extra: { video_type: vtype, ...(x.album?.id && YT_ALBUM.test(x.album.id) ? { album_id: `yt:${x.album.id}` } : {}) },
+    });
+  }
+
+  /** ALBUM-SEARCH-002: the raw albums tab of a search, and an album page, for engine/albums.ts. */
+  albumSearch(q: string, c: Ctx = {}): Promise<Json> {
+    return this.post('search', { query: q, params: ALBUMS_FILTER }, c);
+  }
+
+  albumPage(browseId: string, c: Ctx = {}): Promise<Json> {
+    if (!YT_ALBUM.test(browseId)) return Promise.reject(new ProviderError('That is not a YouTube Music album.'));
+    return this.post('browse', { browseId }, c);
+  }
+
+  /** ARTIST-PAGE-001: the artists tab of a search, an artist page or their songs list, and its next page. */
+  artistSearch(q: string, c: Ctx = {}): Promise<Json> {
+    return this.post('search', { query: q, params: ARTISTS_FILTER }, c);
+  }
+
+  browse(browseId: string, c: Ctx = {}): Promise<Json> {
+    if (!/^(UC[A-Za-z0-9_-]{22}|VL[A-Za-z0-9_-]{10,80})$/.test(browseId)) return Promise.reject(new ProviderError('That is not a YouTube Music artist.'));
+    // An artist's songs list runs about 40 KB a song as sent (4.0 MB for 100 on 2026-11-10).
+    return this.post('browse', { browseId }, c, browseId.startsWith('VL') ? LIST_BYTES : MAX_BYTES);
+  }
+
+  continueBrowse(token: string, c: Ctx = {}): Promise<Json> {
+    if (!/^[A-Za-z0-9_%=-]{20,2000}$/.test(token)) return Promise.reject(new ProviderError('That is not a YouTube Music page.'));
+    return this.post('browse', { continuation: token }, c, LIST_BYTES);
+  }
+
+  /**
+   * ARTIST-FEATURES-001: the whole list behind an artist shelf's "More" link (all their albums, or
+   * all their singles), which the artist page itself only shows about ten of.
+   */
+  discography(browseId: string, params: string, c: Ctx = {}): Promise<Json> {
+    // DISCOGRAPHY-MORE-001: the list has an id of its own now ("MPAD" and the artist's channel); the
+    // channel id alone, as older pages linked it, is still accepted.
+    if (!/^(?:MPAD)?UC[A-Za-z0-9_-]{22}$/.test(browseId)) return Promise.reject(new ProviderError('That is not a YouTube Music artist.'));
+    if (!/^[A-Za-z0-9_%=+-]{4,200}$/.test(params)) return Promise.reject(new ProviderError('That is not a YouTube Music list.'));
+    // Only the parts a release is read from: measured 546 KB as the list comes, 90 KB like this. The
+    // older link form answers a page of shelves instead of a grid, so it is asked for whole.
+    if (!browseId.startsWith('MPAD')) return this.post('browse', { browseId, params }, c);
+    return this.post('browse', { browseId, params }, c, MAX_BYTES, GRID_PARTS).catch((e) => {
+      if (e instanceof BudgetExceeded || e instanceof Cancelled || /HTTP 403\b/.test(String((e as Error)?.message ?? ''))) throw e;
+      return this.post('browse', { browseId, params }, c);
+    });
+  }
+
+  /**
+   * FEATURES-ALL-002: one page of the songs search for `q`, or the page a token from the page before
+   * names. Not cached here: the caller keeps the whole answer once it has every page.
+   */
+  async songSearchPage(q: string, token: string | null, c: Ctx = {}): Promise<{ items: YtItem[]; next: string | null }> {
+    if (token !== null && !/^[A-Za-z0-9_%=-]{20,2000}$/.test(token)) throw new ProviderError('That is not a YouTube Music page.');
+    const body = token === null ? { query: q, params: SONGS_FILTER } : { continuation: token };
+    // Only the parts a row is read from. Measured: 692 KB a page as it comes, 54 KB like this, which
+    // is what makes reading every page affordable against the day's allowance.
+    try {
+      return parseSearchSongsPage(await this.post('search', body, c, MAX_BYTES, SONG_PAGE_PARTS, PAGING_WAITS));
+    } catch (e) {
+      // FEATURES-FLOW-001: still told to slow down after every wait, the caller reports the list as
+      // incomplete; the 700 KB whole page is no remedy for that and is not asked for.
+      if (e instanceof BudgetExceeded || e instanceof Cancelled || /HTTP 403\b/.test(String((e as Error)?.message ?? ''))) throw e;
+      // Anything else is the short form itself being refused: the whole page is asked for instead,
+      // and a failure of that is the caller's to report.
+      return parseSearchSongsPage(await this.post('search', body, c));
+    }
+  }
+
+  search(q: string, limit = 15, c: Ctx = {}): Promise<Track[]> {
+    return cached(c.refresh ? undefined : this.store, `yt:search:${fold(q)}:${limit}`, 'search', 15 * 60, async () => {
+      const r = await this.post('search', { query: q, params: SONGS_FILTER }, c);
+      return parseSearchSongs(r).slice(0, limit).map((x) => this.toTrack(x, 'song'));
+    });
+  }
+
+  /**
+   * The same question asked of YouTube's videos rather than the songs catalogue. Kept apart from
+   * `search` (own cache key, own filter) so a songs miss never satisfies a videos question. The
+   * results are ordinary YouTube ids, so the shells download them exactly as they do a song.
+   */
+  searchVideos(q: string, limit = 15, c: Ctx = {}): Promise<Track[]> {
+    return cached(c.refresh ? undefined : this.store, `yt:videos:${fold(q)}:${limit}`, 'search', 15 * 60, async () => {
+      const r = await this.post('search', { query: q, params: VIDEOS_FILTER }, c);
+      return parseSearchSongs(r).slice(0, limit).map((x) => this.toTrack(x));
+    });
+  }
+
+  song(vid: string, c: Ctx = {}): Promise<Track> {
+    return cached(this.store, `yt:song:${vid}`, 'track', 7 * DAY, async () => {
+      let w;
+      try {
+        w = await this.watch(vid, 1, c);
+      } catch (e) {
+        if (e instanceof ProviderError || /HTTP 4\d\d/.test(String((e as Error).message))) {
+          throw new ProviderError('YouTube has no video at that link, or it is private or removed.');
+        }
+        throw e;
+      }
+      const first = w.tracks[0];
+      if (!first) throw new ProviderError('YouTube Music returned nothing for that video.');
+      if (first.videoId !== vid) throw new ProviderError('That video is unavailable on YouTube Music.');
+      return { ...this.toTrack(first), related_browse: w.related };
+    });
+  }
+
+  async resolveLink(url: string, c: Ctx = {}): Promise<Track> {
+    const u = new URL(url);
+    const host = u.hostname;
+    let vid: string | null = null;
+    if (host === 'youtu.be') vid = u.pathname.replace(/^\/+|\/+$/g, '').split('/')[0] || null;
+    else if (u.pathname === '/watch') vid = u.searchParams.get('v');
+    else if (/^\/(shorts|live|embed)\//.test(u.pathname)) {
+      throw new ProviderError('Shorts, live streams and embeds are videos, not songs. Paste a song or music-video link.');
+    }
+    const playlist = u.searchParams.get('list');
+    if (!vid && u.pathname === '/playlist' && playlist) return this.playlist(playlist, c);
+    if (!vid || !YT_ID.test(vid)) throw new ProviderError('That YouTube link does not point at a single video.');
+    const t = await this.song(vid, c);
+    if (t.kind === 'video') return { ...t, warning: 'YouTube marks this as a user upload, not an official song. It may be a mix, cover or clip.' };
+    return t;
+  }
+
+  /** Playlists are never added whole: the user picks songs, so this always throws NeedsChoice. */
+  async playlist(pid: string, c: Ctx = {}, limit = 25): Promise<never> {
+    if (/^(RD|LL|WL)/.test(pid)) throw new ProviderError('Mixes, Liked and Watch Later lists are personal or generated; paste a public playlist or a song.');
+    let p;
+    try {
+      p = parsePlaylist(await this.post('browse', { browseId: pid.startsWith('VL') ? pid : `VL${pid}` }, c));
+    } catch (e) {
+      if (e instanceof ProviderError && /private, empty/.test(e.message)) throw e;
+      throw new ProviderError('That playlist is private, empty or not available without signing in.');
+    }
+    const tracks = p.tracks.slice(0, limit).map((x) => this.toTrack(x));
+    throw new NeedsChoice('playlist', `“${p.title}” is a playlist. Choose the songs you want from it.`, { title: p.title, count: p.trackCount, tracks, bounded: limit });
+  }
+
+  radio(vid: string, limit: number, c: Ctx = {}): Promise<Track[]> {
+    return cached(this.store, `yt:radio:${vid}:${limit}`, 'related', 6 * H, async () => {
+      // +1: the first track is the seed itself (ytmusicapi's limit counts it).
+      const w = await this.watch(vid, limit + 1, c);
+      return w.tracks.slice(1).slice(0, limit).map((x) => this.toTrack(x));
+    });
+  }
+
+  /** The radio call returns up to 50 tracks regardless of `limit`; take them all (watch() trims to `limit`). */
+  related(vid: string, c: Ctx = {}): Promise<{ songs: Track[]; artists: { id: string | null; name: string }[] }> {
+    return cached(this.store, `yt:related:${vid}`, 'related', 12 * H, async () => {
+      const song = await this.song(vid, c);
+      let browse = song['related_browse'] as string | null | undefined;
+      if (!browse) browse = (await this.watch(vid, 1, c)).related;
+      if (!browse) return { songs: [], artists: [] };
+      const r = parseRelated(await this.post('browse', { browseId: browse }, c));
+      return { songs: r.songs.map((x) => this.toTrack(x)), artists: r.artists };
+    });
+  }
+
+  async findMatch(t: Track, c: Ctx = {}): Promise<{ match: Track | null; uncertain: Track[] }> {
+    if (t.provider === 'ytmusic') return { match: t, uncertain: [] };
+    const q = `${t.artists[0] ?? ''} ${t.title}`.trim();
+    const uncertain: Track[] = [];
+    for (const r of await this.search(q, 8, c)) {
+      const v = matchRecordings(t, r);
+      if (v.verdict === 'same') return { match: r, uncertain: [] };
+      if (v.verdict === 'uncertain') uncertain.push({ ...r, match_note: v.reason });
+    }
+    return { match: null, uncertain: uncertain.slice(0, 5) };
+  }
+}

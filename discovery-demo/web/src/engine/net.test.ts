@@ -1,0 +1,193 @@
+import { describe, expect, it } from 'vitest';
+import {
+  BlockedUrl, BudgetExceeded, CancelToken, Cancelled, DEEZER_API_UA, FetchError, Http, HostPacer, Meter, hostAllowed, validateUrl,
+  type HttpPort, type HttpRequest, type HttpResponse,
+} from './net';
+
+const enc = (s: string) => new TextEncoder().encode(s);
+const resp = (status: number, body = '', headers: Record<string, string> = {}): HttpResponse => ({ status, headers, body: enc(body) });
+const fastPacer = () => new HostPacer({}, 0);
+
+/** A scripted transport: each call pops the next response, and records the URLs it was asked for. */
+function scripted(...steps: (HttpResponse | Error)[]) {
+  const seen: string[] = [];
+  const port: HttpPort = {
+    async request(req: HttpRequest) {
+      seen.push(req.url);
+      const next = steps.shift();
+      if (!next) throw new Error('no more scripted responses');
+      if (next instanceof Error) throw next;
+      return next;
+    },
+  };
+  return { port, seen };
+}
+
+describe('Deezer API request identity (DEEZER-UA-001)', () => {
+  /** Records every request's headers as the transport sees them. */
+  function recording() {
+    const seen: HttpRequest[] = [];
+    const port: HttpPort = { async request(req: HttpRequest) { seen.push(req); return resp(200, '{}'); } };
+    return { http: new Http(port, fastPacer()), seen };
+  }
+  const ua = (r: HttpRequest) => Object.entries(r.headers ?? {}).filter(([k]) => k.toLowerCase() === 'user-agent').map(([, v]) => v);
+
+  it('sends the one app User-Agent to api.deezer.com, whatever the transport would have sent', async () => {
+    const { http, seen } = recording();
+    await http.getJson('https://api.deezer.com/search/track?q=Ken%20Carson&limit=100', { maxBytes: 1000 });
+    await http.getJson('https://API.DEEZER.COM./artist/2568121', { maxBytes: 1000 });
+    // A caller's own identity does not win, and the header is set once, not alongside it.
+    await http.getJson('https://api.deezer.com/track/1', { maxBytes: 1000, headers: { 'user-agent': 'Mozilla/5.0 (Linux; Android 14) wv', Accept: 'application/json' } });
+    expect(DEEZER_API_UA).toBe('AirwaveDiscovery/0.18.13');
+    expect(DEEZER_API_UA).not.toMatch(/android|mozilla|chrome|windows/i);
+    expect(seen.map(ua)).toEqual([[DEEZER_API_UA], [DEEZER_API_UA], [DEEZER_API_UA]]);
+    expect(seen[2]!.headers!['Accept']).toBe('application/json');
+  });
+
+  it('leaves every other host’s headers exactly as the caller set them, and the URL guard still runs first', async () => {
+    const { http, seen } = recording();
+    const mine = { 'User-Agent': 'Mozilla/5.0 Chrome/151', Referer: 'https://open.spotify.com/' };
+    await http.getJson('https://open.spotify.com/oembed?url=x', { maxBytes: 1000, headers: mine });
+    await http.getJson('https://musicbrainz.org/ws/2/artist?query=x', { maxBytes: 1000 });
+    await http.getJson('https://cdns-preview-1.dzcdn.net/x', { maxBytes: 1000 });
+    await http.getJson('https://www.deezer.com/track/1', { maxBytes: 1000 });
+    expect(seen[0]!.headers).toEqual(mine);
+    expect(seen.slice(1).map((r) => r.headers)).toEqual([undefined, undefined, undefined]);
+    for (const bad of ['http://api.deezer.com/x', 'https://api.deezer.com:8443/x', 'https://api.deezer.com.evil.net/x']) {
+      await expect(http.getJson(bad, { maxBytes: 1000 })).rejects.toBeInstanceOf(BlockedUrl);
+    }
+    expect(seen).toHaveLength(4);
+  });
+
+  it('does not carry the Deezer identity across a redirect to another host', async () => {
+    const { port, seen } = scripted(resp(302, '', { location: 'https://www.deezer.com/en/track/1' }), resp(200, '{}'));
+    const reqs: HttpRequest[] = [];
+    const http = new Http({ request: (r) => (reqs.push(r), port.request(r)) }, fastPacer());
+    await http.getJson('https://api.deezer.com/track/1', { maxBytes: 1000 });
+    expect(seen).toHaveLength(2);
+    expect(reqs.map(ua)).toEqual([[DEEZER_API_UA], []]);
+  });
+});
+
+describe('host allowlist (the web engine\'s own list; server/net.py has a narrower Deezer/SoundCloud set and is not mirrored here)', () => {
+  it('allows the music hosts and their media CDNs', () => {
+    for (const h of ['api.deezer.com', 'API.DEEZER.COM', 'api.deezer.com.', 'cdns-preview-1.dzcdn.net', 'cdn-files.sndcdn.com', 'api-v2.soundcloud.com', 'youtu.be']) {
+      expect(hostAllowed(h), h).toBe(true);
+    }
+  });
+  it('allows the search providers (MusicSearch) and their artwork hosts', () => {
+    for (const h of ['itunes.apple.com', 'api-partner.spotify.com', 'clienttoken.spotify.com', 'open.qobuz.com',
+      'na.web.skill.music.a2z.com', 'music.amazon.com', 'resources.tidal.com', 'api.song.link', 'lrclib.net', 'musicbrainz.org', 'i.ytimg.com',
+      // SOURCE-MORE-001: Audius's keyless read API and Bandcamp's own search/details endpoints.
+      'api.audius.co', 'audius.co', 'bandcamp.com', 'api-v2.hearthis.at']) {
+      expect(hostAllowed(h), h).toBe(true);
+    }
+  });
+  it('keeps the download resolver hosts out of the allowlist', () => {
+    for (const h of ['spotidownloader.com', 'zaz.mesk.skill.music.a2z.com', 'api.zarz.moe', 'qbz.afkarxyz.fun', 'api.github.com', 'pypi.org']) {
+      expect(hostAllowed(h), h).toBe(false);
+    }
+  });
+  it('refuses lookalikes and unknown hosts', () => {
+    for (const h of ['evil-deezer.com', 'api.deezer.com.evil.net', 'dzcdn.net.attacker.io', 'localhost', '127.0.0.1', '169.254.169.254', '',
+      'audius.co.evil.net', 'bandcamp.com.attacker.io', 'notbandcamp.com', 'audius.example.com', 'api-v2.hearthis.at.evil.net']) {
+      expect(hostAllowed(h), h).toBe(false);
+    }
+  });
+});
+
+describe('validateUrl', () => {
+  it('accepts a plain https link on an allowed host', () => {
+    expect(validateUrl('https://api.deezer.com/search?q=x')).toBe('https://api.deezer.com/search?q=x');
+    expect(validateUrl('https://api.deezer.com:443/track/1')).toBeTruthy();
+  });
+  it('refuses http, credentials, non-standard ports, and unknown hosts', () => {
+    expect(() => validateUrl('http://api.deezer.com/x')).toThrow(BlockedUrl);
+    expect(() => validateUrl('https://user:pw@api.deezer.com/x')).toThrow(BlockedUrl);
+    expect(() => validateUrl('https://api.deezer.com:8443/x')).toThrow(BlockedUrl);
+    expect(() => validateUrl('https://example.com/x')).toThrow(BlockedUrl);
+    expect(() => validateUrl('not a url')).toThrow(BlockedUrl);
+  });
+});
+
+describe('Http guard', () => {
+  it('returns the body for an allowed 200', async () => {
+    const { port, seen } = scripted(resp(200, '{"ok":true}'));
+    const http = new Http(port, fastPacer());
+    const j = await http.getJson<{ ok: boolean }>('https://api.deezer.com/x', { maxBytes: 1000 });
+    expect(j.ok).toBe(true);
+    expect(seen).toEqual(['https://api.deezer.com/x']);
+  });
+
+  it('re-validates every redirect hop: a redirect to a non-allowed host is refused', async () => {
+    const { port, seen } = scripted(resp(302, '', { location: 'https://evil.example/steal' }));
+    const http = new Http(port, fastPacer());
+    await expect(http.get('https://api.deezer.com/x', { maxBytes: 1000 })).rejects.toThrow(BlockedUrl);
+    expect(seen).toEqual(['https://api.deezer.com/x']); // never requested the evil host
+  });
+
+  it('follows an allowed redirect and reports the final URL', async () => {
+    const { port } = scripted(resp(301, '', { location: 'https://www.deezer.com/track/9' }), resp(200, 'hi'));
+    const http = new Http(port, fastPacer());
+    const { finalUrl } = await http.get('https://deezer.com/link', { maxBytes: 1000 });
+    expect(finalUrl).toBe('https://www.deezer.com/track/9');
+  });
+
+  it('refuses a declared Content-Length over the cap before reading', async () => {
+    const { port } = scripted(resp(200, 'x', { 'content-length': '999999' }));
+    const http = new Http(port, fastPacer());
+    await expect(http.get('https://api.deezer.com/x', { maxBytes: 100 })).rejects.toThrow(BudgetExceeded);
+  });
+
+  it('aborts when the bytes actually received exceed the cap, not the advertised length', async () => {
+    const { port } = scripted(resp(200, 'x'.repeat(500), { 'content-length': '10' }));
+    const http = new Http(port, fastPacer());
+    await expect(http.get('https://api.deezer.com/x', { maxBytes: 100 })).rejects.toThrow(BudgetExceeded);
+  });
+
+  it('retries 429 and 5xx with backoff, then gives up as a FetchError', async () => {
+    const { port, seen } = scripted(resp(503), resp(503), resp(503));
+    const http = new Http(port, fastPacer());
+    await expect(http.get('https://api.deezer.com/x', { maxBytes: 1000, retries: 2 })).rejects.toThrow(FetchError);
+    expect(seen.length).toBe(3);
+  }, 15000);
+
+  it('stops before the request when the cancel token is set', async () => {
+    const { port, seen } = scripted(resp(200, 'ok'));
+    const http = new Http(port, fastPacer());
+    const token = new CancelToken();
+    token.cancel('user left');
+    await expect(http.get('https://api.deezer.com/x', { maxBytes: 1000, token })).rejects.toThrow(Cancelled);
+    expect(seen).toEqual([]);
+  });
+
+  it('counts received bytes against the meter and refuses once the allowance is used', async () => {
+    const meter = new Meter(50, 1000);
+    const { port } = scripted(resp(200, 'x'.repeat(40)), resp(200, 'x'.repeat(40)));
+    const http = new Http(port, fastPacer());
+    await http.get('https://api.deezer.com/a', { maxBytes: 1000, meter, category: 'search' });
+    expect(meter.total).toBe(40);
+    await expect(http.get('https://api.deezer.com/b', { maxBytes: 1000, meter, category: 'search' })).rejects.toThrow(BudgetExceeded);
+  });
+});
+
+describe('Meter.reserve', () => {
+  it('gives a spent request a small allowance that still counts against the day', () => {
+    const seen: number[] = [];
+    const m = new Meter(1000, 5000, (_c, n) => seen.push(n));
+    m.add('metadata', 1200); // the request cap is already used up
+    expect(m.remaining()).toBe(0);
+    const r = m.reserve(300);
+    expect(r.remaining()).toBe(300);
+    r.add('metadata', 100);
+    expect(r.remaining()).toBe(200);
+    expect(seen).toEqual([1200, 100]);
+  });
+  it('never exceeds what is left of the day', () => {
+    const m = new Meter(1000, 1100);
+    m.add('metadata', 1000);
+    expect(m.reserve(300).remaining()).toBe(100);
+    m.add('metadata', 200);
+    expect(m.reserve(300).remaining()).toBe(0);
+  });
+});

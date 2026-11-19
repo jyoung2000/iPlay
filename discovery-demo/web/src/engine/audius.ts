@@ -1,0 +1,117 @@
+/**
+ * Audius adapter (SOURCE-MORE-001).
+ *
+ * api.audius.co/v1 is Audius's own documented, keyless read API (an `app_name` is asked for by the
+ * docs and sent here; no key, no account, no paid tier). It is in this app because the returned
+ * uploads carry a declared whole-track length, and yt-dlp's `audius` extractor attempts the
+ * corresponding public stream. Catalogue rows can outlive their audio: a 71-second Lofibeat entry
+ * still returned metadata on 2026-11-06 although its stream returned 404. Only a completed native
+ * download can mark one ready; the loader retries a different source on a dead link.
+ *
+ * Nothing here loosens identity: the mapping only reports what Audius says, and `matchRecordings`
+ * still decides whether the upload is the same recording.
+ */
+import type { CancelToken, Http, Meter } from './net';
+import { cached } from './deezer';
+import * as G from './genres';
+import { fold } from './identity';
+import type { Store } from './store';
+import { makeTrack, release, type Track } from './track';
+
+type Json = Record<string, any>;
+
+export interface Ctx {
+  meter?: Meter;
+  token?: CancelToken;
+  /** A user-driven retry: ask again instead of replaying a cached (often empty) answer. */
+  refresh?: boolean;
+}
+
+const API = 'https://api.audius.co/v1';
+/** The docs ask every caller to name itself; this is that name, not a credential. */
+export const AUDIUS_APP = 'AirwaveDiscovery';
+const SITE = 'https://audius.co';
+
+/**
+ * One upload to a Track, or null when the public audio is not the whole song.
+ *
+ * A gated track (`is_stream_gated`, or any `preview_start_seconds`) plays only a clip without a
+ * purchase or an unlock, so it is refused outright: this app downloads whole songs or nothing.
+ */
+function toTrack(e: Json): Track | null {
+  if (!e || typeof e !== 'object') return null;
+  if (e.is_delete || e.is_unlisted || e.is_available === false) return null;
+  if (e.is_stream_gated || e.preview_start_seconds !== null && e.preview_start_seconds !== undefined) return null;
+  const id = String(e.id ?? '');
+  const permalink = typeof e.permalink === 'string' ? e.permalink : '';
+  const duration = Number(e.duration);
+  if (!id || !permalink || !Number.isFinite(duration) || duration <= 0) return null;
+  const artist = String(e.user?.name ?? e.user?.handle ?? '').trim();
+  const tags: (G.Tag | null)[] = [];
+  if (e.genre) tags.push(G.makeTag(String(e.genre), 'Audius uploader genre', 'track', 0.6));
+  if (e.mood) tags.push(G.makeTag(String(e.mood), 'Audius uploader mood', 'track', 0.3));
+  for (const tg of String(e.tags ?? '').split(',').map((s) => s.trim()).filter(Boolean).slice(0, 6)) {
+    tags.push(G.makeTag(tg, 'Audius uploader tag', 'track', 0.4));
+  }
+  const art: string | null = e.artwork?.['480x480'] ?? e.artwork?.['1000x1000'] ?? e.artwork?.['150x150'] ?? null;
+  return makeTrack({
+    provider: 'audius',
+    platformId: id,
+    title: String(e.title ?? ''),
+    artists: artist ? [artist] : ['Unknown artist'],
+    album: null,
+    duration,
+    artwork: art,
+    url: `${SITE}${permalink.startsWith('/') ? '' : '/'}${permalink}`,
+    isrc: typeof e.isrc === 'string' && e.isrc ? e.isrc : null,
+    rel: release(String(e.release_date ?? '').slice(0, 10), 'upload', 'Audius'),
+    tags,
+    // Audius serves the whole upload; this app has no use for a clip and never records one.
+    preview: null,
+  });
+}
+
+/** `{data: [...]}` from /v1/tracks/search to Tracks, dropping anything not downloadable in full. */
+export function parseAudiusTracks(d: unknown): Track[] {
+  const rows = (d as Json)?.data;
+  if (!Array.isArray(rows)) return [];
+  return rows.map((e) => toTrack(e as Json)).filter((t): t is Track => !!t);
+}
+
+export class Audius {
+  readonly name = 'audius';
+  readonly label = 'Audius';
+
+  constructor(private readonly http: Http, private readonly store?: Store) {}
+
+  private opts(c: Ctx, maxBytes: number): Parameters<Http['getJson']>[1] {
+    const o: Parameters<Http['getJson']>[1] = { category: 'metadata', maxBytes };
+    if (c.meter) o.meter = c.meter;
+    if (c.token) o.token = c.token;
+    return o;
+  }
+
+  /** ARTIST-ALL-SOURCES-001: the accounts a name finds, as Audius sends them (`is_verified` among the rest). */
+  users(q: string, c: Ctx = {}): Promise<Json[]> {
+    return cached(c.refresh ? undefined : this.store, `audius:users:${fold(q)}`, 'search', 15 * 60, async () => {
+      const d = await this.http.getJson<Json>(`${API}/users/search?query=${encodeURIComponent(q)}&limit=10&app_name=${AUDIUS_APP}`, this.opts(c, 1_000_000));
+      return (Array.isArray(d?.data) ? d.data : []).filter((u: unknown) => u && typeof u === 'object') as Json[];
+    });
+  }
+
+  /** An account's own uploads that play in full. */
+  async userTracks(id: string, c: Ctx = {}): Promise<Track[]> {
+    if (!/^[A-Za-z0-9]{1,24}$/.test(id)) return [];
+    return parseAudiusTracks(await this.http.getJson<Json>(`${API}/users/${id}/tracks?limit=100&app_name=${AUDIUS_APP}`, this.opts(c, 3_000_000)));
+  }
+
+  search(q: string, limit = 10, c: Ctx = {}): Promise<Track[]> {
+    return cached(c.refresh ? undefined : this.store, `audius:search:${fold(q)}:${limit}`, 'search', 15 * 60, async () => {
+      const o: Parameters<Http['getJson']>[1] = { category: 'metadata', maxBytes: 2_000_000 };
+      if (c.meter) o.meter = c.meter;
+      if (c.token) o.token = c.token;
+      const url = `${API}/tracks/search?query=${encodeURIComponent(q)}&limit=${Math.max(1, Math.min(20, limit))}&app_name=${AUDIUS_APP}`;
+      return parseAudiusTracks(await this.http.getJson<Json>(url, o)).slice(0, limit);
+    });
+  }
+}

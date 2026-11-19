@@ -1,0 +1,4264 @@
+/*
+ * jPlay — the demo's layout on top of the Airwave window kit (airwave-window.css).
+ * The kit supplies the tokens, Aqua push buttons, fields, segmented control, wells, status dots and
+ * focus rings. This file adds the music workspace: a pearl desk instead of the kit's grey desktop,
+ * a sidebar, the seed shelf, the queue, and an iPod-like player with an LCD and a click-wheel.
+ */
+:root {
+  --pearl: #f7f6f3;
+  --pearl-2: #efeee9;
+  --panel: #ffffff;
+  --hair: #dcdad4;
+  --hair-2: #e9e7e2;
+  --shadow: 0 1px 2px rgba(30, 30, 30, 0.06), 0 6px 20px rgba(30, 30, 30, 0.06);
+  --accent: #1f6fd1;
+  --accent-soft: #e6effb;
+  /* DL-GRADIENT-001: every downloader visualizer runs this blue -> green, so distance along a
+     track reads the same everywhere. Blue is the window kit's accent, green its --success. */
+  --dl-from: #1f6fd1;
+  --dl-to: #3a9a5e;
+  --radius: 12px;
+  --dock-h: 76px;
+  --tab-h: 56px;
+  --side-w: 188px;
+  --rail-w: 312px;
+}
+
+body {
+  background: linear-gradient(#fbfaf8, var(--pearl) 40%, var(--pearl-2));
+  background-attachment: fixed;
+  padding: 0;
+  font-size: 13px;
+}
+
+.skip {
+  position: absolute;
+  left: -999px;
+  top: 8px;
+  z-index: 50;
+  background: var(--panel);
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+.skip:focus {
+  left: 8px;
+}
+
+/* ------------------------------------------------------------------ layout */
+.app {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 20px;
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 20px 24px 40px;
+  align-items: start;
+  min-height: 100dvh;
+}
+.main {
+  min-width: 0;
+  display: grid;
+  gap: 16px;
+}
+.rail {
+  min-width: 0;
+}
+
+@media (max-width: 1180px) {
+  .brand__name,
+  .side__item span,
+  .side__count {
+    display: none;
+  }
+  .side__item {
+    justify-content: center;
+  }
+  .brandlogo__word {
+    display: none;
+  }
+  .brandlogo__mark {
+    display: block;
+  }
+}
+/* The Windows window keeps names at any width, so it keeps the wordmark too. */
+.is-desktop-shell .brandlogo__word {
+  display: block;
+}
+.is-desktop-shell .brandlogo__mark {
+  display: none;
+}
+
+/* ------------------------------------------------------------------ sidebar
+   Desktop: one column, so the navigation is a top bar across it (the sidebar grid column is gone).
+   Phone: the same tabs become a fixed bottom bar (see the phone block further down). */
+.side {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: 0 -24px;
+  padding: 8px 24px;
+  background: rgba(250, 249, 247, 0.92);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--hair);
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0;
+}
+/* JPLAY-BRAND-001 (owner, 2026-11-19): the jPlay logo from the owner's artwork. The wordmark (its "j" is
+   the note figure) where there is room, the figure alone where the side bar is icons only. The colour
+   layer is the logo's own shape (mask) blended as "color": the artwork's grey shading stays, the hue and
+   saturation are the listening mood's (--brand-tint, see brand-tint.ts). No tint = the artwork's grey. */
+.brandlogo {
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+}
+.brandlogo__mark,
+.brandlogo__word {
+  position: relative;
+  display: block;
+  height: 100%;
+  background: center / contain no-repeat;
+  isolation: isolate;
+}
+.brandlogo__mark {
+  display: none;
+  aspect-ratio: 782 / 938;
+  background-image: url('/brand/jplay-mark.png');
+}
+.brandlogo__word {
+  aspect-ratio: 1650 / 612;
+  background-image: url('/brand/jplay-wordmark.png');
+}
+.brandlogo__mark::after,
+.brandlogo__word::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-color: transparent;
+  mix-blend-mode: color;
+  transition: background-color 900ms ease;
+  -webkit-mask: center / contain no-repeat;
+  mask: center / contain no-repeat;
+}
+.brandlogo__mark::after {
+  -webkit-mask-image: url('/brand/jplay-mark.png');
+  mask-image: url('/brand/jplay-mark.png');
+}
+.brandlogo__word::after {
+  -webkit-mask-image: url('/brand/jplay-wordmark.png');
+  mask-image: url('/brand/jplay-wordmark.png');
+}
+.brandlogo.is-tinted .brandlogo__mark::after,
+.brandlogo.is-tinted .brandlogo__word::after {
+  background-color: var(--brand-tint);
+}
+@media (prefers-reduced-motion: reduce) {
+  .brandlogo__mark::after,
+  .brandlogo__word::after {
+    transition: none;
+  }
+}
+/* The phone's page head: only where the side bar is a bottom tab bar (see max-width: 899px). */
+.phonebrand {
+  display: none;
+}
+.side__nav {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  gap: 2px;
+  flex: 1 1 auto;
+  justify-content: flex-end;
+}
+.side__item {
+  appearance: none;
+  border: 0;
+  background: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  color: var(--ink-2);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 100ms ease, color 100ms ease, transform 70ms ease;
+}
+.side__item:active {
+  transform: translateY(1px);
+}
+@media (hover: hover) {
+.side__item:hover {
+  background: rgba(0, 0, 0, 0.04);
+  color: var(--ink);
+}
+}
+/* FLAT-BTN-001: the selected tab is the play disc's blue, flat; it was a three-stop Aqua gel. */
+.side__item.is-on {
+  background: #0071e3;
+  color: #fff;
+  font-weight: 700;
+}
+.side__count {
+  margin: 0;
+  padding: 0 10px;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+
+/* The Windows window keeps its names beside the side-nav icons and the brand, at any width. The phone
+   breakpoints that hide them are for the WebView; the desktop shell is always wide enough to show them. */
+.is-desktop-shell .side__item span,
+.is-desktop-shell .brand__name {
+  display: inline;
+}
+.is-desktop-shell .side__item {
+  justify-content: flex-start;
+}
+
+/* ------------------------------------------------------------------ shared surfaces */
+.card,
+.search,
+.shelf,
+.go,
+.queue {
+  background: var(--panel);
+  border: 1px solid var(--hair);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 16px 18px;
+  min-width: 0;
+}
+.card h2,
+.shelf h2,
+.queue h2 {
+  font-size: 14px;
+  margin: 0;
+}
+.card {
+  display: grid;
+  gap: 12px;
+}
+.card__head,
+.shelf__head,
+/* Heading and status sit together on the left; the one action is pinned to the right edge. A
+   space-between row with three children stranded the button a third of the way across. */
+.queue__head {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px 14px;
+  flex-wrap: wrap;
+}
+.queue__head > .push {
+  margin-left: auto;
+}
+/* LIST-METER-003: the header's actions as one group pinned right (QUEUE-HEAD-001 still holds - the
+   action stays on the right, the heading and status on the left). They must share a container:
+   as loose siblings the auto margin on .push drove them onto separate wrapped lines, measured 40px
+   apart on the desktop app and 225px apart on a 412px phone. */
+.queue__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.queue__actions > .push {
+  margin-left: 0;
+}
+.count {
+  color: var(--ink-3);
+  font-weight: 400;
+  font-size: 12px;
+  margin-left: 6px;
+}
+.state {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--ink-2);
+  margin: 0;
+  padding: 10px 2px;
+}
+/* UI-POLISH-001: a note that wraps keeps its icon on the first line (it was centred between lines).
+   Notes holding a button keep centring, so the words stay level with the button. */
+.state:not(:has(> button)) {
+  align-items: flex-start;
+}
+.state:not(:has(> button)) > svg:first-child {
+  flex: none;
+  margin-top: 3px;
+  margin-top: calc((1lh - 14px) / 2);
+}
+.state--bad {
+  color: var(--danger);
+}
+/* A newer answer is on its way: the list on screen is the last one, so it stays and only softens. No layout change.
+   Descendant, not child: the title results sit in their own wrapper, and a child selector never matched them. */
+.is-refreshing .tracks,
+.is-refreshing .srcline {
+  opacity: 0.55;
+  transition: opacity 120ms ease;
+}
+.is-refreshing .tracks {
+  pointer-events: none;
+}
+.empty {
+  padding: 18px 8px;
+  text-align: center;
+}
+.empty--hero {
+  display: grid;
+  place-items: center;
+  gap: 10px;
+  padding: 34px 12px;
+  color: var(--ink-2);
+}
+.empty--hero p {
+  margin: 0;
+  max-width: 34em;
+}
+.empty__art {
+  width: 64px;
+  height: 64px;
+  border-radius: 14px;
+  display: grid;
+  place-items: center;
+  color: var(--ink-3);
+  background: linear-gradient(#fdfdfc, #ecebe7);
+  box-shadow: inset 0 0 0 1px var(--hair);
+}
+.banner {
+  display: flex;
+  gap: 8px;
+  /* UI-POLISH-001: the icon belongs to the first line; centred on a wrapped note it floated between lines. */
+  align-items: flex-start;
+  margin: 0;
+  padding: 9px 12px;
+  border-radius: 9px;
+  border: 1px solid var(--hair);
+  background: var(--panel);
+}
+.banner:not(.banner--list) > .aqua-icon {
+  flex: none;
+  margin-top: 3px;
+  margin-top: calc((1lh - 14px) / 2);
+}
+.banner--bad {
+  border-color: #e6b3b0;
+  background: #fdf3f2;
+  color: #8a2a25;
+}
+.banner--sample {
+  border-color: #e7d29b;
+  background: #fdf8e8;
+  color: #6b5413;
+  margin-bottom: 10px;
+}
+.banner code {
+  font-family: var(--mono);
+}
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: 40;
+  margin: 0;
+  padding: 9px 14px;
+  border-radius: 10px;
+  background: rgba(30, 30, 30, 0.88);
+  color: #fff;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+  max-width: min(92vw, 520px);
+}
+.app--docked.has-dock .toast {
+  bottom: calc(var(--tab-h) + var(--dock-h) + 16px);
+}
+.linkbtn {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 2px 0;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.linkbtn:disabled {
+  color: var(--ink-3);
+  text-decoration: none;
+}
+.iconbtn {
+  appearance: none;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid var(--hair);
+  background: #fff;
+  display: grid;
+  place-items: center;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+@media (hover: hover) {
+.iconbtn:hover {
+  color: var(--ink);
+  border-color: #c6c3bb;
+}
+}
+.iconbtn[aria-pressed='true'] {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: #b8cff0;
+}
+.iconbtn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.iconbtn--sm {
+  width: 24px;
+  height: 24px;
+}
+.push {
+  cursor: pointer;
+  /*
+   * BTN-TEXT-001 — owner: "ensure the text in the buttons are centered and justified".
+   *
+   * `.push` dresses both <button> (which centres its own text) and <a download> (which does not),
+   * so Export my data sat left while every real button looked centred. Centring here covers both,
+   * and the flex rules centre a label that is an icon plus words as one group.
+   */
+  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+/* FLAT-BTN-001: the size and face of .push--big are in flat-controls.css. */
+.push--danger {
+  color: var(--danger);
+}
+.push--small {
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+a.push {
+  display: inline-block;
+  text-decoration: none;
+}
+.field {
+  font-family: var(--font);
+  font-size: 13px;
+}
+
+/* ------------------------------------------------------------------ search */
+.search__form {
+  /* One full-width field. There is no Search button: results follow the typing and Enter submits. File and Mic sit
+     inside the bar's right end; while there is text a Clear button takes File's place so the Mic never moves. */
+  position: relative;
+}
+.search__field {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+.search__icon {
+  position: absolute;
+  left: 14px;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  color: var(--ink-3);
+  pointer-events: none;
+}
+/* Styleguide §6 "The recessed field": light from above, so the well is shadowed at the top with a lit lower lip. */
+.search__field .field {
+  width: 100%;
+  min-height: 44px;
+  padding: 6px 96px 7px 40px;
+  border-radius: 22px;
+  font-size: 16px;
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 20%), inset 0 2px 3px rgb(0 0 0 / 32%), 0 1px 0 rgb(255 255 255 / 70%);
+}
+.search__field .field:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.search__field .field::placeholder {
+  font-size: 16px;
+}
+.search__field .field::-webkit-search-cancel-button {
+  display: none;
+}
+.search__spin {
+  display: block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #c4c2ba;
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: search-spin 0.8s linear infinite;
+}
+@keyframes search-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.search__clear {
+  display: none;
+}
+.search__form.has-text .search__clear {
+  display: grid;
+  place-items: center;
+  position: absolute;
+  top: 0;
+  right: 46px;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 22px;
+  background: transparent;
+  color: var(--ink-3);
+}
+.search__clear:active {
+  background: rgba(0, 0, 0, 0.08);
+}
+.search__clear:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.search__clear[disabled] {
+  opacity: 0.5;
+}
+.search__hint {
+  margin: 8px 2px 0;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+/* Identify-by-sound (Fable/Astra search-bar extension): File and Listen beside Search, and one status panel in the
+   results area. There is no mode switch: the one field takes a title, lyrics or a link. */
+.find__acts {
+  position: absolute;
+  top: 0;
+  right: 2px;
+  height: 44px;
+  display: inline-flex;
+  gap: 0;
+}
+.find__act {
+  /* A bare icon: no pill around it. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  border-image: none;
+  border-radius: 22px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--ink-3);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  overflow: visible;
+}
+@media (hover: hover) {
+.find__act:hover:not([disabled]) {
+  background: rgba(0, 0, 0, 0.05);
+}
+}
+.find__act:active:not([disabled]) {
+  background: rgba(0, 0, 0, 0.1);
+}
+.find__act:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.search__form.has-text .find__act--file {
+  display: none;
+}
+.find__act[disabled] {
+  opacity: 0.5;
+  cursor: default;
+}
+.find__act--mic {
+  color: var(--accent);
+}
+.find__glyph {
+  flex: none;
+  display: block;
+  overflow: visible;
+}
+.find__help {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border: 1px solid #ecd7b0;
+  border-radius: 10px;
+  background: #fdf7ea;
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+}
+.find__help p {
+  margin: 0;
+}
+.find__help-title {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-weight: 700;
+  color: var(--ink);
+}
+.find__help-title svg {
+  color: var(--warning);
+}
+.find__help-body {
+  color: var(--ink-2);
+  font-size: 12px;
+}
+.find__help-detail {
+  color: var(--ink-3);
+}
+.listen {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--hair);
+  border-radius: 10px;
+  background: var(--accent-soft);
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+.listen__pulse {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: var(--accent);
+  background: #fff;
+  border: 1px solid #b8cff0;
+}
+.listen__pulse.is-live {
+  color: #fff;
+  background: var(--accent);
+  /* --lvl (0..1) is written from the microphone every frame: the ring grows with the sound */
+  box-shadow: 0 0 0 calc(2px + var(--lvl, 0) * 12px) rgba(31, 111, 209, calc(0.18 + var(--lvl, 0) * 0.3));
+  transform: scale(calc(1 + var(--lvl, 0) * 0.12));
+  transition: box-shadow 70ms linear, transform 70ms linear;
+}
+.listen__bars {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  height: 36px;
+  max-width: 260px;
+}
+.listen__bar {
+  --h: 0.08;
+  flex: 1 1 0;
+  min-width: 2px;
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(var(--accent), #5aa0f0);
+  transform: scaleY(var(--h));
+  transform-origin: center;
+  transition: transform 60ms linear;
+}
+.listen__now {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+.listen__label {
+  margin: 0;
+  color: var(--ink);
+}
+.listen__sub {
+  color: var(--ink-3);
+  font-size: 12px;
+}
+.listen__sub--warn {
+  color: #8a4b00;
+}
+.micset {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+}
+.micset__row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.micset__select {
+  flex: 1 1 220px;
+  min-width: 0;
+  max-width: 100%;
+}
+.micset__test {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--hair);
+  border-radius: 10px;
+  background: var(--accent-soft);
+  box-sizing: border-box;
+  min-width: 0;
+}
+.micset__test .listen__bars {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.micset__db {
+  flex: none;
+  min-width: 52px;
+  text-align: right;
+  color: var(--ink-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.micset__state {
+  margin: 0;
+  color: var(--ink-2);
+}
+.micset__state.is-ok {
+  color: #1f6b2a;
+}
+.micset__state.is-warn {
+  color: #8a4b00;
+}
+.listen__row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.listen__meter {
+  flex: 1 1 auto;
+  max-width: 220px;
+  height: 6px;
+  border-radius: 3px;
+  background: #fff;
+  border: 1px solid #c9d8ee;
+  overflow: hidden;
+}
+.listen__level {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transform-origin: left center;
+  transition: transform 90ms linear;
+}
+.listen__time {
+  color: var(--ink-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.listen__actions {
+  flex: none;
+  display: inline-flex;
+  gap: 6px;
+}
+.track__evidence {
+  color: var(--ink-3);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.track__evidence--quote {
+  font-style: italic;
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.track__evidence mark {
+  background: #fff1b8;
+  color: var(--ink);
+  font-style: normal;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.results {
+  margin-top: 12px;
+}
+.srcline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  /* SRC-GAP-001 (owner, 2026-11-19): room between the source line and the artist, album and song
+     lists below it, so they never sit on it. */
+  margin: 8px 2px 12px;
+  color: var(--ink-3);
+  font-size: 11px;
+}
+.srcline__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+/* SRC-REFRESH-001: the quick refresh sits at the end of the source line, a full 44px target. The labels
+   wrap in their own group (same gaps as a plain source line) and the button stays beside them. */
+.srcline--refresh {
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+}
+.srcline__items {
+  display: flex;
+  flex-wrap: wrap;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 4px 12px;
+  margin: 0;
+}
+.srcline__refresh {
+  /* A 36px circle in a 44px box, as the rows' buttons are drawn, so the target is real both ways. */
+  box-sizing: content-box;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 4px solid transparent;
+  background-clip: content-box;
+  box-shadow: inset 0 0 0 1px var(--hair);
+  margin-left: auto;
+}
+/* LIST-FOLDER-001: why the folder did not open, beside its button. */
+.list-folder__note {
+  color: var(--danger);
+  font-size: 12px;
+}
+/* SRC-BUDGET-001: the allowance note's way to Settings, a full 44px target on its own line. */
+/* A wrapped note keeps its icon on the first line, not centred beside line two like a stray bullet. */
+.budget-note > .state {
+  align-items: flex-start;
+}
+.budget-note > .state > svg {
+  flex: none;
+  margin-top: 3px;
+}
+.budget-note > .push {
+  min-height: 44px;
+  margin: 0 2px 10px;
+}
+.state > .srcline__refresh {
+  margin-left: 8px;
+  vertical-align: middle;
+}
+.srcline__refresh.is-busy svg {
+  animation: srcline-spin 900ms linear infinite;
+}
+@keyframes srcline-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .srcline__refresh.is-busy svg {
+    animation: none;
+  }
+}
+.choice {
+  margin-top: 12px;
+  display: grid;
+  gap: 8px;
+}
+.choice__fix {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* track rows (search results, saved) */
+.tracks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-radius: 9px;
+  max-height: 420px;
+  overflow: auto;
+}
+.track {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  /* QUEUE-CTRL-001: positioning context for the cache rail on saved rows. */
+  position: relative;
+  padding: 7px 10px;
+  min-height: 56px;
+  border-bottom: 1px solid var(--hair-2);
+}
+.track:last-child {
+  border-bottom: 0;
+}
+.track:nth-child(even) {
+  background: #fafaf8;
+}
+.track.is-added {
+  background: var(--accent-soft);
+}
+.track__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+}
+/* The owner's rule: a song's title and artist are never cut off. They wrap; the row grows. */
+.track__title,
+.track__artist {
+  overflow-wrap: anywhere;
+}
+.track__meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.track__title {
+  font-weight: 700;
+}
+.track__artist {
+  color: var(--ink-2);
+}
+.track__meta {
+  color: var(--ink-3);
+  font-size: 11px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.track__src,
+.track__srcname {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.track__warn {
+  color: var(--warning);
+}
+.track__dur {
+  flex: none;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+.track__actions {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.addbtn {
+  min-width: 70px;
+}
+.vtag {
+  display: inline-block;
+  /* VTAG-GAP-001: the title text and its tags have no space between them in the markup. */
+  margin-inline-start: 6px;
+  padding: 0 6px;
+  border-radius: 7px;
+  font-size: 10px;
+  line-height: 15px;
+  font-weight: 700;
+  color: var(--ink-2);
+  background: var(--pearl-2);
+  border: 1px solid var(--hair);
+  vertical-align: 1px;
+  /* a long version name ("Extended Club Remix 2024") stays inside a narrow row, margin included */
+  max-width: calc(100% - 6px);
+  box-sizing: border-box;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vtag--new {
+  color: #fff;
+  background: var(--success);
+  border-color: transparent;
+}
+
+/* artwork */
+.art {
+  flex: none;
+  display: block;
+  object-fit: cover;
+  border-radius: 6px;
+  background: var(--pearl-2);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.08);
+}
+.art--none {
+  display: grid;
+  place-items: center;
+  color: var(--ink-3);
+  background: linear-gradient(#fbfbfa, #e9e8e3);
+}
+
+/* ------------------------------------------------------------------ seed shelf */
+.shelf__list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+  scroll-snap-type: x proximity;
+}
+.seed {
+  flex: none;
+  width: 212px;
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  gap: 4px 8px;
+  align-items: center;
+  padding: 7px 8px;
+  border: 1px solid var(--hair);
+  border-radius: 10px;
+  background: linear-gradient(#fff, #f8f7f4);
+  scroll-snap-align: start;
+}
+.seed__text {
+  min-width: 0;
+  display: grid;
+}
+.seed__title,
+.seed__artist {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.seed__title {
+  font-weight: 700;
+  font-size: 12px;
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  line-height: 1.25;
+}
+.seed__artist {
+  color: var(--ink-2);
+  font-size: 11px;
+}
+.shelf__empty {
+  margin: 10px 0 0;
+  color: var(--ink-3);
+}
+
+/* ------------------------------------------------------------------ go */
+.go {
+  display: grid;
+  gap: 10px;
+}
+.go__controls {
+  display: flex;
+  gap: 14px 22px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.go .seg__btn {
+  cursor: pointer;
+}
+.dial {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 260px;
+  min-width: 0;
+}
+.dial__end {
+  color: var(--ink-2);
+  font-size: 12px;
+  flex: none;
+}
+.dial input,
+.prog__bar {
+  flex: 1 1 auto;
+  min-width: 80px;
+  appearance: none;
+  height: 6px;
+  border-radius: 3px;
+  /* Flat, like the player's own progress track: the old inset shadow read as a box drawn around the slider. */
+  background: linear-gradient(to right, #0071e3 var(--pct, 50%), #dcdcd8 var(--pct, 50%));
+  box-shadow: none;
+  cursor: pointer;
+}
+.dial input::-webkit-slider-thumb,
+.vol__bar::-webkit-slider-thumb,
+.prog__bar::-webkit-slider-thumb {
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  /* A flat head with one hairline ring, to match the flat track. */
+  background: #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.22), 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+.dial input::-moz-range-thumb,
+.vol__bar::-moz-range-thumb,
+.prog__bar::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 0;
+  background: #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.22), 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+.dial__num {
+  min-width: 2ch;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  font-weight: 700;
+}
+.rec__facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  /* These chips wrap onto two lines on a phone, so the row gap is the one that decides how tall
+     the band gets; keep it tighter than the gap between chips on a line. */
+  gap: 4px 6px;
+  margin-top: 2px;
+}
+
+.fact {
+  padding: 0 6px;
+  border-radius: 7px;
+  font-size: 10px;
+  line-height: 15px;
+  color: var(--ink-2);
+  background: var(--pearl-2);
+  border: 1px solid var(--hair);
+  white-space: nowrap;
+}
+/* SONG-CARD-001: slightly larger, borderless pills retain the song's Taste Picker colour.
+   TAGS-COLOR-001: a 45% tint and a 10px dot. The tint shows the family, the dot the exact sister shade;
+   genre-palette's sisters are close by design ("alike but distinct"), so the dot has to be big enough to read. */
+.genre {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 18px;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+  border: 0;
+  background: color-mix(in srgb, var(--tone, var(--accent)) 45%, var(--pearl-2));
+}
+.genre::before {
+  content: '';
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--tone, var(--accent));
+  flex: none;
+}
+/* GENRE-ALL-001: a genre the app estimated, not one a service stated. Never by colour alone: the
+   outline is dashed and the dot hollow, and the bubble says where the estimate came from. */
+.genre--guess {
+  padding: 0 7px;
+  border: 1px dashed color-mix(in srgb, var(--tone, var(--ink-3)) 70%, var(--ink-3));
+  background: transparent;
+  color: var(--ink-2);
+}
+.genre--guess::before {
+  background: transparent;
+  box-shadow: inset 0 0 0 2px var(--tone, var(--ink-3));
+}
+.genre--tone {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-color: color-mix(in srgb, var(--tone, var(--hair)) 55%, var(--hair));
+  background: color-mix(in srgb, var(--tone, var(--pearl-2)) 14%, var(--pearl-2));
+}
+.genre--tone::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--tone, var(--ink-3));
+  flex: none;
+}
+.note--taste {
+  color: var(--ink-2);
+}
+.go__hint {
+  margin: 0;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+.go__level {
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.go__fresh {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  cursor: pointer;
+}
+.go__fresh input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--aqua-mid);
+}
+.go__freshnote {
+  color: var(--ink-3);
+  font-size: 12px;
+}
+.go__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.go__why {
+  color: var(--ink-2);
+}
+.go__sample {
+  margin-left: auto;
+  font-size: 12px;
+}
+
+/* ------------------------------------------------------------------ queue */
+.queue {
+  display: grid;
+  gap: 10px;
+}
+.queue__meta {
+  color: var(--ink-2);
+  font-size: 12px;
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+.queue__meta .sdot {
+  margin-top: 0;
+}
+.queue__foot {
+  margin: 0;
+  color: var(--ink-3);
+  font-size: 11px;
+}
+.recs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--hair);
+  border-radius: 14px;
+  overflow: hidden;
+}
+.rec {
+  /* SONG-CARD-001. Three bands, after Fable's .card/.card__top:
+     1. the rank and artwork, with the title and artist levelled against them;
+     2. the reason line and tags, indented under the title;
+     3. one unbroken row of controls, using the row's full width.
+     Every child has a named cell, so nothing wraps into the rank or art column. */
+  display: grid;
+  grid-template-columns: 26px 64px minmax(0, 1fr) auto auto;
+  grid-template-areas:
+    'rank art text tier dur'
+    '. . sub sub sub'
+    '. . actions actions actions';
+  gap: 6px 12px;
+  align-items: center;
+  /* QUEUE-CTRL-001: the cache rail is absolutely positioned, because every grid child here needs a
+     named area and an unplaced one would be auto-placed into the rank/art columns. */
+  position: relative;
+  padding: 10px 12px 10px 8px;
+  border-bottom: 1px solid var(--hair-2);
+  background: var(--panel);
+  outline: none;
+}
+.rec:last-child {
+  border-bottom: 0;
+}
+.rec:nth-child(even) {
+  background: #fbfbf9;
+}
+.rec.is-focus {
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.rec:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--focus);
+}
+/* The row being played carries the same highlight as the focused row, so the list always shows what the player has. */
+.rec.is-playing {
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.rec.is-playing .rec__title {
+  color: var(--accent);
+}
+.rec.is-disliked {
+  opacity: 0.55;
+}
+.rec__rank {
+  grid-area: rank;
+  /* Levelled with the cover and the title beside it, never with the whole multi-line row. */
+  align-self: center;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  font-size: 12px;
+}
+.rec__art {
+  grid-area: art;
+  position: relative;
+  /* Levelled with the title and artist beside it, not with the whole row. */
+  align-self: center;
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.rec__art .art {
+  width: 64px;
+  height: 64px;
+  border-radius: 8px;
+}
+.rec__playover {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.35);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.rec__art:focus-visible .rec__playover,
+.rec.is-playing .rec__playover {
+  opacity: 1;
+}
+/* The overlay also marks the playing song, so a tap must not leave it on the cover (BTN-UNIFORM-001). */
+@media (hover: hover) {
+.rec__art:hover .rec__playover {
+  opacity: 1;
+}
+}
+.rec__text {
+  grid-area: text;
+  min-width: 0;
+  display: grid;
+  align-self: center;
+  gap: 1px;
+}
+/* The reason line and the tags, indented under the title. */
+.rec__sub {
+  grid-area: sub;
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+.rec__why1 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The song's identity is never cut: the full title and the full artist/features list wrap onto
+   as many lines as they need, at every width. anywhere breaks a single long unspaced token
+   (a run-on remix title) rather than letting it widen the row. */
+.rec__title,
+.rec__artist {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.rec__title {
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+}
+.rec__artist {
+  color: var(--ink-2);
+  font-size: 13px;
+  font-weight: 500;
+}
+.rec__why1 {
+  color: var(--ink-3);
+  font-size: 11px;
+}
+/* UI-POLISH-001: on the baseline the 11px icon sat 2px above its words; this centres it on them. */
+.rec__why1 > svg {
+  vertical-align: -2px;
+}
+.rec__tier {
+  grid-area: tier;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--ink-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.rec__dur {
+  grid-area: dur;
+  text-align: right;
+  color: var(--ink-3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+/* SIMILAR-SOUND-001: a separate, named row; do not squeeze a seventh action into the six
+   compact transport/feedback controls (those must remain on one line even at 320px). */
+/* SIMILAR-ICON-001: Find similar sound is one of the row's round icon buttons (Results.tsx). */
+@media (hover: hover) { .rec__similar:hover { color: var(--accent); } }
+.rec__similar:disabled { opacity: 0.55; cursor: wait; }
+.rec__similar:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.rec__actions {
+  grid-area: actions;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: flex-start;
+  /* All six controls stay on one line. The why pill is the only flexible child, so a squeeze
+     ellipsises its label instead of dropping it to a second row. */
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+/* Fable paints a round 36px icon button; Astra wants a 44px target. The button is therefore a
+   36px CIRCLE inside a box that is a full 44px TALL: the extra 8px is carried by transparent
+   top and bottom borders over an explicit content box, so the border area still takes the tap
+   while every painted thing — the fill (background-clip) and the ring (an inset shadow, drawn
+   inside the padding box) — stays in the 36 x 36 content box, where the 999px radius clamps to
+   a true circle. The ring cannot be a real border: that would be drawn round the 36 x 44 box
+   and read as a capsule, which is also why hover and pressed recolour the shadow, not the
+   border. An ::after overlay was tried first and does not work: neighbouring buttons' inflated
+   areas overlap and steal each other's hits, measuring 41px at best and 36px once the gap
+   narrows.
+   Six 44px-wide targets plus a label cannot fit a 320px row (6 x 44 = 264 > 252), so width
+   is the axis that gives; height, where a mis-tap is likeliest, keeps the full 44px.
+   The search list's actions share this paint (SEARCH-ICONS-001): one icon language, two lists. */
+.rec__actions .iconbtn,
+.track__actions .iconbtn {
+  box-sizing: content-box;
+  width: 36px;
+  height: 36px;
+  flex: none;
+  padding: 0;
+  border: 4px solid transparent;
+  border-left-width: 0;
+  border-right-width: 0;
+  background-clip: content-box;
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 1px var(--hair);
+}
+@media (hover: hover) {
+.rec__actions .iconbtn:hover,
+.track__actions .iconbtn:hover {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px #c6c3bb;
+}
+}
+.rec__actions .iconbtn[aria-pressed='true'],
+.track__actions .iconbtn[aria-pressed='true'] {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px #b8cff0;
+}
+.whybtn {
+  appearance: none;
+  border: 1px solid var(--hair);
+  background: #fff;
+  border-radius: 12px;
+  padding: 3px 10px;
+  font-size: 12px;
+  color: var(--ink-2);
+  cursor: pointer;
+  white-space: nowrap;
+  /* The one child that may shrink, so the row never pushes the page sideways. */
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.whybtn[aria-expanded='true'] {
+  color: var(--accent);
+  border-color: #b8cff0;
+  background: var(--accent-soft);
+}
+/* The full phrase on a desktop row; "Why?" once the row is narrow enough that five icons
+   would otherwise ellipsise it away. aria-label carries the whole question either way. */
+.whybtn__short {
+  display: none;
+}
+@media (max-width: 480px) {
+  .whybtn__full {
+    display: none;
+  }
+  .whybtn__short {
+    display: inline;
+  }
+}
+.openlink {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 12px;
+  border: 1px solid var(--hair);
+  background: #fff;
+  color: var(--ink-2);
+  font-size: 12px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+@media (hover: hover) {
+.openlink:hover {
+  color: var(--ink);
+  border-color: #c6c3bb;
+}
+}
+.why {
+  grid-column: 3 / -1;
+  margin: 4px 0 2px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: var(--pearl);
+  border: 1px solid var(--hair-2);
+  display: grid;
+  gap: 6px;
+}
+/* The save menu drops under the row that opened it, in the same column as the why panel. */
+.rec__savemenu {
+  grid-column: 3 / -1;
+  margin: 2px 0 4px;
+}
+/* The same menu under a search row (SEARCH-LIKE-001); the row is a grid, so it spans the lot. */
+.track__savemenu {
+  grid-column: 1 / -1;
+  margin: 2px 0 4px;
+}
+.why__reasons {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+}
+.why__line {
+  display: flex;
+  gap: 7px;
+  align-items: baseline;
+}
+.why__line::before {
+  content: '';
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--aqua-mid);
+  transform: translateY(-1px);
+}
+.why__meta,
+.why__unsure {
+  color: var(--ink-3);
+  font-size: 11px;
+  margin: 0;
+}
+.why__unsure {
+  color: #8a6512;
+}
+
+/* ------------------------------------------------------------------ player (panel) */
+.np {
+  background: #fff;
+  border: 1px solid rgb(0 0 0 / 10%);
+  border-radius: 16px;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 6%), 0 4px 16px rgb(0 0 0 / 5%);
+  padding: 12px 16px;
+  display: grid;
+  gap: 12px;
+}
+/* Desktop panel: a bar, grouped the way the phone dock is (NP-STRIP-005). Art and title left; the
+   progress bar heading the middle with the transport centred beneath it, as the dock stacks them; one right-hand
+   cluster of the song's actions and the volume, with the open-in links beneath. The old grid had
+   areas for four of its five children, so like/dislike/download auto-placed into an orphan third
+   row — the "tacked on" toolbar the owner saw. The click wheel and Up next are phone-dock controls. */
+.np--panel {
+  max-height: 50vh;
+  overflow: hidden;
+  /* Measured, inside the 872px bar (800px after padding and gaps): the side cluster needs 258px
+     for three 44px actions, the mute button and a 72px channel on one row, so 264; the progress
+     column at least 280 (a 204px bar — the owner found 148 small); the rest to the song. Fixed
+     tracks on purpose: an `auto` side track once measured its wrapped-links row and swallowed
+     the title column entirely. */
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 1fr) 264px;
+  grid-template-areas:
+    'main prog side'
+    'main tx side';
+  align-items: center;
+  column-gap: 20px;
+  row-gap: 4px;
+}
+.np--panel .np__main {
+  grid-area: main;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  color: var(--ink);
+}
+.np--panel .np__main .art {
+  /* As tall as the title, artist and note beside it; 52px sat small against a 72px text block. */
+  width: 64px;
+  height: 64px;
+  flex: none;
+  border-radius: 6px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+.np--panel .np__embed {
+  /* The dock's 96px, not 128: with a full song playing, the player stands where the art was,
+     and at 128px it left the title 58px in an 872px bar — "GOYARD" was ellipsised. */
+  width: 96px;
+  flex: none;
+  aspect-ratio: 16 / 9;
+}
+.np--panel .np__text {
+  /* min-width 0 lets the title ellipsise inside its column instead of pushing into the progress bar */
+  text-align: left;
+  min-width: 0;
+  flex: 1 1 0;
+  overflow: hidden;
+}
+.np--panel .np__title,
+.np--panel .np__artist {
+  display: block;
+}
+/* The owner's rule: a title is never cut off. Up to three lines; the bar grows for them. A
+   second line is rare and a third rarer ("Hell At Night (feat. Ella Langley)" beside the player). */
+.np--panel .np__title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  white-space: normal;
+  line-height: 1.25;
+}
+/* The same rule for the artist line: it wraps rather than ending in an ellipsis. */
+.np--panel .np__artist {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+}
+.np--panel .np__note {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  /* STREAM-DL-001: three lines, like the title. The note column measures 178px beside the artwork
+     and controls, where two lines cut "…through the equalise…" off the streaming statuses (measured
+     in the packaged window: 66px of text in a 33px box). Every status now fits whole. */
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  white-space: normal;
+  font-size: 11px;
+  /* --ink-2, not --ink-3: measured on the white panel, --ink-3 (#96999C) is 2.86:1 at this size,
+     under the 4.5:1 bar for normal text, and the owner found the note block hard to read.
+     --ink-2 is 6.86:1 and is what the Audio settings copy already uses. */
+  color: var(--ink-2);
+  opacity: 1;
+}
+.np--panel .prog {
+  grid-area: prog;
+  min-width: 0;
+}
+/* Flat progress: a hairline track with an accent fill and a small round head, always drawn, so the
+   playhead can be seen and grabbed without hunting for it (NP-STRIP-006). */
+.np .prog__bar {
+  height: 4px;
+  min-width: 0;
+  border: 0;
+  border-radius: 2px;
+  background: linear-gradient(to right, #0071e3 var(--pct, 0%), rgb(0 0 0 / 14%) var(--pct, 0%));
+  box-shadow: none;
+}
+.np .prog__bar::-webkit-slider-thumb {
+  width: 12px;
+  height: 12px;
+  background: #fff;
+  border: 0;
+  box-shadow: 0 0 0 0.5px rgb(0 0 0 / 20%), 0 1px 2px rgb(0 0 0 / 25%);
+  opacity: 1;
+}
+.np .prog__bar::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  background: #fff;
+  border: 0;
+  box-shadow: 0 0 0 0.5px rgb(0 0 0 / 20%), 0 1px 2px rgb(0 0 0 / 25%);
+  opacity: 1;
+}
+.np .prog:hover .prog__bar::-webkit-slider-thumb,
+.np .prog__bar:focus-visible::-webkit-slider-thumb,
+.np .prog__bar:active::-webkit-slider-thumb,
+/* The volume shares the .prog__bar class but is not inside .prog, so the hover rule above never
+   reaches it and its head stayed invisible. Volume is a set-and-forget control: show it always. */
+.np .vol__bar::-webkit-slider-thumb {
+  opacity: 1;
+}
+.np .prog:hover .prog__bar::-moz-range-thumb,
+.np .prog__bar:focus-visible::-moz-range-thumb,
+.np .prog__bar:active::-moz-range-thumb,
+.np .vol__bar::-moz-range-thumb {
+  opacity: 1;
+}
+.np .prog__bar:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgb(0 113 227 / 40%);
+}
+.np .prog__bar:disabled {
+  opacity: 0.45;
+}
+/* Playhead: a touch screen has no hover, so the head is always drawn there, larger, and the track gets a tall
+   invisible touch area (the drawn line stays 4px) so it can be dragged easily with a thumb. */
+@media (hover: none), (pointer: coarse) {
+  .np .prog__bar {
+    box-sizing: content-box;
+    padding: 12px 0;
+    background-clip: content-box;
+  }
+  .np .prog__bar::-webkit-slider-thumb {
+    width: 18px;
+    height: 18px;
+    opacity: 1;
+  }
+  .np .prog__bar::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    opacity: 1;
+  }
+}
+.np--panel .transport {
+  grid-area: tx;
+  justify-content: center;
+}
+/* The right-hand cluster: actions and volume on one row, right-aligned, links on the row beneath.
+   Everything here is auto-sized so the cluster can never push past the panel's edge. */
+.np--panel .np__side {
+  grid-area: side;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: end;
+  gap: 8px 16px;
+  min-width: 0;
+}
+.np--panel .np__side .vol {
+  order: 2;
+  width: auto;
+  flex: none;
+}
+.np--panel .np__side .vol__bar {
+  width: 72px;
+  min-width: 0;
+  flex: none;
+}
+/* The channel is 4px; the 8px of padding each side is the hit area, not paint. `.np .prog__bar`'s
+   background shorthand resets background-clip to border-box, which painted the whole 20px box —
+   the fat bar the owner saw. The dock already guards this; the panel has to as well. */
+.np--panel .np__side .vol__bar {
+  background-clip: content-box;
+}
+/* The number is the dock's rule too: a channel with a knob says the level; "55" beside it is noise. */
+.np--panel .np__side .vol__n {
+  display: none;
+}
+.np--panel .np__side .np__track-actions {
+  order: 1;
+}
+.np--panel .np__open {
+  /* A full row of the cluster, under the controls; links wrap rather than clip. */
+  order: 3;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  align-items: center;
+  overflow: hidden;
+  justify-content: end;
+  gap: 6px;
+  margin: 0;
+  min-width: 0;
+}
+.np--panel .np__open .openlink {
+  /* Flat and quiet, like every other control on this player; the Aqua gloss pill was the one
+     glossy thing left on a flat surface. */
+  padding: 3px 10px;
+  font-size: 11px;
+  white-space: nowrap;
+  flex: none;
+  border: 1px solid rgb(0 0 0 / 14%);
+  border-radius: 11px;
+  background: #fff;
+  box-shadow: none;
+  color: var(--ink-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.np--panel .np__open .openlink .openlink__out {
+  margin-left: 1px;
+  font-size: 10px;
+  opacity: 0.6;
+}
+@media (hover: hover) {
+.np--panel .np__open .openlink:hover {
+  border-color: rgb(0 0 0 / 28%);
+  color: var(--ink);
+}
+}
+.np--panel .wheel,
+.np--panel .upnext {
+  display: none;
+}
+.np__embed {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border: 0;
+  border-radius: 6px;
+  background: #000;
+}
+.np__text {
+  min-width: 0;
+  width: 100%;
+  display: grid;
+  text-align: center;
+}
+.np__title,
+.np__artist {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.np__title {
+  font-weight: 700;
+  font-size: 14px;
+}
+.np__artist {
+  font-size: 12px;
+  opacity: 0.8;
+}
+.np__note {
+  margin: 6px 0 0;
+  font-size: 11px;
+  opacity: 0.8;
+  white-space: normal;
+}
+.np__note--bad {
+  color: var(--danger);
+  opacity: 1;
+}
+
+.np__idle {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  padding: 18px 10px;
+  border-radius: 10px;
+  border: 1px solid #7f8a8e;
+  background: linear-gradient(var(--lcd-top), var(--lcd-bot));
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.3);
+  color: var(--lcd-ink);
+  text-align: center;
+  font-size: 12px;
+}
+.np__idleart {
+  opacity: 0.6;
+}
+.np__open {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+}
+.prog {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.prog__t {
+  flex: none;
+  font-size: 11px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+  min-width: 30px;
+  text-align: center;
+}
+.prog__bar {
+  height: 5px;
+}
+.prog__bar::-webkit-slider-thumb {
+  width: 12px;
+  height: 12px;
+}
+.transport {
+  display: flex;
+  /* The buttons are 32, 36 and 44px tall; without this they hang from the top edge and shuffle
+     sits visibly above the play disc's centre line. */
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+.tbtn {
+  appearance: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background-color 150ms ease, opacity 150ms ease;
+}
+@media (hover: hover) {
+.tbtn:hover:not(:disabled) {
+  background: rgb(0 0 0 / 6%);
+}
+}
+/* The one filled control: the play/pause disc, flat accent, no gloss. */
+.tbtn--main {
+  width: 44px;
+  height: 44px;
+  color: #fff;
+  background: #0071e3;
+}
+@media (hover: hover) {
+.tbtn--main:hover:not(:disabled) {
+  background: #0077ed;
+}
+}
+/* Shuffle and repeat: quiet when off; when on, the accent colour on a faint tint. */
+.tbtn--mode {
+  width: 32px;
+  height: 32px;
+  color: var(--ink-3);
+}
+.tbtn--mode.is-on {
+  color: #0071e3;
+  background: rgb(0 113 227 / 12%);
+}
+.tbtn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgb(0 113 227 / 45%);
+}
+.tbtn:active:not(:disabled) {
+  transform: scale(0.96);
+}
+.tbtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* click wheel */
+.wheel {
+  display: grid;
+  place-items: center;
+  padding: 2px 0;
+}
+.wheel__ring {
+  position: relative;
+  width: 132px;
+  height: 132px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 30%, #ffffff, #efeeea 55%, #dcdad3);
+  box-shadow: inset 0 1px 0 #fff, inset 0 -2px 6px rgba(0, 0, 0, 0.08), 0 0 0 1px #c9c6be, 0 2px 6px rgba(0, 0, 0, 0.12);
+  touch-action: none;
+  user-select: none;
+  cursor: grab;
+}
+.wheel__ring:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--aq-ring), 0 0 3px 5px var(--aq-halo);
+}
+.wheel__btn {
+  position: absolute;
+  appearance: none;
+  border: 0;
+  background: none;
+  color: #8d8a83;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 8px;
+  display: flex;
+  gap: 1px;
+  cursor: pointer;
+}
+@media (hover: hover) {
+.wheel__btn:hover {
+  color: var(--ink);
+}
+}
+.wheel__btn:disabled {
+  opacity: 0.4;
+}
+.wheel__btn--menu {
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+.wheel__btn--play {
+  bottom: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+.wheel__btn--prev {
+  left: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+.wheel__btn--next {
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+.wheel__centre {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  width: 58px;
+  height: 58px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  appearance: none;
+  border: 1px solid #c9c6be;
+  background: radial-gradient(circle at 50% 30%, #fff, #f0efeb 70%, #e2e0da);
+  box-shadow: inset 0 1px 0 #fff, 0 1px 2px rgba(0, 0, 0, 0.12);
+  cursor: pointer;
+}
+.wheel__centre:active {
+  background: radial-gradient(circle at 50% 40%, #ecebe7, #dedcd6);
+}
+
+.upnext h3 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-3);
+  margin: 0 0 6px;
+}
+.upnext ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+.upnext__row {
+  appearance: none;
+  width: 100%;
+  border: 0;
+  background: none;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 4px;
+  border-radius: 7px;
+  text-align: left;
+  cursor: pointer;
+}
+@media (hover: hover) {
+.upnext__row:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+}
+.upnext__text {
+  min-width: 0;
+  display: grid;
+}
+.upnext__title,
+.upnext__artist {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.upnext__artist {
+  color: var(--ink-2);
+  font-size: 11px;
+}
+
+/* ------------------------------------------------------------------ settings */
+.settings {
+  display: grid;
+  gap: 16px;
+}
+.settings .pref {
+  grid-template-columns: 170px minmax(0, 1fr);
+}
+.numrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  color: var(--ink-2);
+}
+.field--num {
+  flex: 0 0 80px;
+  font-family: var(--mono);
+}
+.captable {
+  display: grid;
+  border: 1px solid var(--hair);
+  border-radius: 9px;
+  overflow: auto;
+}
+.captable__row {
+  display: grid;
+  grid-template-columns: minmax(130px, 1.4fr) repeat(6, minmax(78px, 1fr));
+  border-bottom: 1px solid var(--hair-2);
+  min-width: 620px;
+}
+.captable__row:last-child {
+  border-bottom: 0;
+}
+.captable__row > span {
+  padding: 7px 9px;
+  font-size: 12px;
+}
+.captable__row--head > span {
+  font-weight: 700;
+  color: var(--ink-2);
+  background: var(--pearl);
+}
+.captable__src {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 700;
+}
+.cap {
+  color: var(--ink-3);
+}
+.cap--working {
+  color: var(--success);
+  font-weight: 700;
+}
+.cap--degraded {
+  color: #a77408;
+  font-weight: 700;
+}
+.cap--unavailable {
+  color: var(--danger);
+}
+.meter {
+  height: 8px;
+  border-radius: 4px;
+  background: #e4e7ea;
+  overflow: hidden;
+}
+/* FLAT-BTN-001: a flat fill in the play disc's blue; it was the kit's gel gradient under a dark inset edge. */
+.meter span {
+  display: block;
+  height: 100%;
+  background: #0071e3;
+}
+/* DL-GRADIENT-001: a DOWNLOAD meter runs blue -> green, because reaching the end is success. The
+   plain .meter above still carries the Settings storage meter, where filling up is a warning. */
+/* LIST-METER-003: and it carries no dark edge. The shared .meter's inset shadow draws a hard dark
+   line round the bar, which frames the gradient like a border; the Settings capacity meter keeps
+   that edge, since there it helps read the bar as a container filling up. */
+.meter--dl {
+  box-shadow: none;
+}
+.meter--dl span {
+  width: 100%;
+  background: linear-gradient(to right, var(--dl-from), var(--dl-to));
+  clip-path: inset(0 calc(100% - var(--fill, 0%)) 0 0);
+}
+.kv {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 4px 18px;
+}
+.kv > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px dotted var(--hair);
+  padding: 3px 0;
+}
+.kv dt {
+  color: var(--ink-2);
+}
+.kv dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* ------------------------------------------------------------------ profile: what the recommender tracks */
+.profile {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+}
+.profile > .card {
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+}
+.profile details {
+  min-width: 0;
+}
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 8px;
+}
+.tile {
+  display: grid;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--hair);
+  border-radius: 10px;
+  background: var(--pearl);
+  min-width: 0;
+}
+.tile__v {
+  font-size: 20px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.tile__k {
+  color: var(--ink-2);
+  font-size: 12px;
+}
+.ptable {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: auto;
+}
+.ptable caption {
+  text-align: left;
+  color: var(--ink-2);
+  font-size: 12px;
+  padding-bottom: 4px;
+}
+.ptable th,
+.ptable td {
+  padding: 5px 6px;
+  border-bottom: 1px dotted var(--hair);
+  text-align: left;
+  vertical-align: middle;
+  font-variant-numeric: tabular-nums;
+}
+.ptable thead th {
+  color: var(--ink-3);
+  font-weight: 400;
+  font-size: 11px;
+}
+.ptable tbody th {
+  font-weight: 600;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ptable tbody th .fact {
+  margin-left: 6px;
+  font-weight: 400;
+}
+.ptable__title {
+  display: block;
+}
+.ptable__sub {
+  display: block;
+  color: var(--ink-2);
+  font-weight: 400;
+  font-size: 12px;
+}
+.ptable__bar {
+  width: 42%;
+  min-width: 0;
+  white-space: normal;
+}
+/* A bar and its number share one line: the bar takes the room, the number keeps a fixed width. */
+.pcell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.pcell .sbar,
+.pcell .pbar {
+  flex: 1 1 auto;
+  width: auto;
+  max-width: 220px;
+  min-width: 48px;
+}
+.ptable__bar .num {
+  flex: none;
+  white-space: nowrap;
+}
+.ptable__facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.ptable .num {
+  display: inline-block;
+  min-width: 3.2em;
+  text-align: right;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.sbar,
+.pbar {
+  position: relative;
+  display: inline-block;
+  vertical-align: middle;
+  /* One column width for every bar in the profile, so the bars line up whatever the row holds. */
+  width: min(100%, 220px);
+  height: 8px;
+  border-radius: 4px;
+  background: var(--pearl-2);
+  border: 1px solid var(--hair-2);
+  overflow: hidden;
+}
+.sbar::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--hair);
+}
+.sbar__fill,
+.pbar__fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  background: var(--accent);
+}
+.sbar__fill.is-neg {
+  left: auto;
+  background: var(--danger);
+}
+.plog {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+}
+.plog li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.plog li.plog__row {
+  align-items: center;
+}
+.plog li.plog__row .art {
+  flex: none;
+  border-radius: 6px;
+  padding: 4px 0;
+  border-bottom: 1px dotted var(--hair);
+  min-width: 0;
+}
+.plog__when {
+  color: var(--ink-3);
+  font-size: 11px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.plog__what {
+  flex: 1;
+  min-width: 0;
+  /* A title and its features must never be cut off (SONG-CARD-001). On the emulator
+     "Mamacita (feat. Rich Homie Quan & Young Thug) — Travis Scott" wanted 367px in a 363px box and
+     lost its artist to an ellipsis. It wraps now; `anywhere` keeps one long unbroken word in. */
+  overflow-wrap: anywhere;
+}
+.plog__len {
+  color: var(--ink-3);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.plog__kind--complete,
+.plog__kind--replay,
+.plog__kind--like,
+.plog__kind--save {
+  color: var(--accent);
+}
+.plog__kind--skip,
+.plog__kind--dislike,
+.plog__kind--hide {
+  color: var(--danger);
+}
+.raw {
+  max-width: 100%;
+  box-sizing: border-box;
+  max-height: 420px;
+  overflow: auto;
+  font-size: 11px;
+  background: var(--pearl);
+  border: 1px solid var(--hair);
+  border-radius: 8px;
+  padding: 10px;
+  margin: 8px 0 0;
+  white-space: pre;
+}
+@media (max-width: 480px) {
+  /* On a phone the bar column takes the room the other columns leave, so a bar stays readable. */
+  .ptable__bar {
+    width: 52%;
+  }
+  .pcell {
+    gap: 6px;
+  }
+  .pcell .sbar,
+  .pcell .pbar {
+    min-width: 72px;
+  }
+  .ptable .num {
+    min-width: 2.6em;
+  }
+  .plog li {
+    flex-wrap: wrap;
+  }
+  .plog__what {
+    flex-basis: 100%;
+    order: 3;
+  }
+}
+@media (max-width: 400px) {
+  /* A narrow phone (320 to 400px): the bars may shrink so a table never leaves its card or pushes the page
+     (and the fixed tab bar) sideways. PROFILE-NARROW-001: this block must stay after the 480px one, or
+     that one's 72px bars win. */
+  .pcell .sbar,
+  .pcell .pbar {
+    min-width: 32px;
+  }
+  /* The shared .num box is 64px wide; a score here needs 48px, and the table needs the difference. */
+  .ptable .num {
+    width: 48px;
+  }
+  .ptable th,
+  .ptable td {
+    padding-left: 4px;
+    padding-right: 4px;
+  }
+}
+
+/* ------------------------------------------------------------------ mobile and tablet: one column, docked player */
+/* The docked player is fixed at the bottom: a control reached by keyboard, or scrolled into view, stops
+   above it rather than under it (the phone rule adds the tab bar). */
+html {
+  scroll-padding-bottom: calc(var(--dock-h) + 16px);
+}
+@media (max-width: 899px) {
+  .app {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+    /* The status bar is cleared by the Android root view's padding (ANDROID-INSETS-001), not by
+       env(safe-area-inset-top) — which the native side consumes and so reads 0 here. This 24px is
+       breathing room BELOW that bar, so the first row is not flush against the clock. The owner
+       asked for more than the original 10px after seeing it on a real phone: with the inset the
+       search field now sits about 76 CSS px down on a 2.625dpr device (51.8 native + 24). */
+    padding: 24px 12px 24px;
+  }
+  /* Phone: the tabs are a fixed bottom bar; the docked player sits above it (--tab-h + --dock-h). */
+  /* A control reached by keyboard, or scrolled into view, stops above both rather than under them. */
+  html {
+    scroll-padding-bottom: calc(var(--tab-h) + var(--dock-h) + 16px + env(safe-area-inset-bottom));
+  }
+  .app {
+    padding-bottom: calc(var(--tab-h) + 24px + env(safe-area-inset-bottom));
+  }
+  .app.has-dock {
+    padding-bottom: calc(var(--tab-h) + var(--dock-h) + 24px + env(safe-area-inset-bottom));
+  }
+  .side {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    top: auto;
+    z-index: 25;
+    margin: 0;
+    padding: 4px 6px calc(4px + env(safe-area-inset-bottom));
+    height: calc(var(--tab-h) + env(safe-area-inset-bottom));
+    background: rgba(250, 249, 247, 0.94);
+    backdrop-filter: blur(12px);
+    border-top: 1px solid var(--hair);
+    border-bottom: 0;
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+  }
+  /* The brand and the count are not part of a tab bar on a phone. */
+  .brand {
+    display: none;
+  }
+  /* JPLAY-BRAND-001: the logo heads the page instead, small, so the page loses little height. */
+  .phonebrand {
+    display: flex;
+    align-items: center;
+    height: 26px;
+    margin: 0 0 -6px 2px;
+  }
+  .phonebrand .brandlogo {
+    height: 24px;
+  }
+  .phonebrand .brandlogo__word {
+    display: block;
+  }
+  .phonebrand .brandlogo__mark {
+    display: none;
+  }
+  .side__count {
+    display: none;
+  }
+  .side__nav {
+    flex: 1 1 auto;
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
+    justify-content: stretch;
+    gap: 2px;
+    margin: 0;
+    padding: 0;
+  }
+  .side__nav > li {
+    min-width: 0;
+    display: flex;
+  }
+  .side__item {
+    flex: 1 1 auto;
+    flex-direction: column;
+    justify-content: center;
+    gap: 3px;
+    min-height: 48px;
+    padding: 6px 2px;
+    font-size: 11px;
+    line-height: 1.1;
+    position: relative;
+  }
+  .side__item span {
+    display: block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .side__item .count {
+    position: absolute;
+    margin-left: 22px;
+    margin-top: -4px;
+  }
+  .side__item.is-on {
+    box-shadow: none;
+    color: var(--accent);
+    background: none;
+  }
+  .rail {
+    position: static;
+  }
+
+  .np--docked {
+    position: fixed;
+    left: 0;
+    right: 0;
+    /* Above the tab bar, never over it. */
+    bottom: calc(var(--tab-h) + env(safe-area-inset-bottom));
+    z-index: 24;
+    border-radius: 16px 16px 0 0;
+    padding: 8px 12px 8px;
+    min-height: var(--dock-h);
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.1);
+  }
+  .np--docked.is-empty {
+    display: none;
+  }
+  .np--docked .np__main {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    min-width: 0;
+  }
+  .np--docked .np__embed {
+    width: 96px;
+    flex: none;
+  }
+  .np--docked .np__text {
+    /* The title column must keep real width: the embed and the controls are fixed, the text takes what is left. */
+    text-align: left;
+    min-width: 0;
+    flex: 1 1 0;
+    overflow: hidden;
+  }
+  /* The owner's rule: a title and its artist are never cut off. They wrap, and the strip grows for
+     them; App.tsx measures the strip into --dock-h, so the list still clears it. */
+  .np--docked .np__title,
+  .np--docked .np__artist {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+  }
+  .np__dockctl {
+    display: grid;
+    gap: 2px;
+    width: 152px;
+  }
+  /* Five buttons need the whole row: stack the controls under the title on every phone width. */
+  .np--docked .vol__n {
+    display: none;
+  }
+
+  .np--docked .transport {
+    gap: 2px;
+    flex: none;
+  }
+  .np--docked .tbtn {
+    width: 44px;
+    height: 44px;
+  }
+  .np--docked .tbtn--main {
+    width: 44px;
+    height: 44px;
+  }
+  .np--docked .tbtn--mode {
+    width: 36px;
+    height: 44px;
+    border-radius: 12px;
+  }
+  .np--docked .vol__btn {
+    width: 40px;
+    height: 44px;
+  }
+  /* A slim channel: the bar is 4px tall, with the touch area held by the padding so it is easy to hit.
+     The actions share this row, so the volume gets what is left after the transport and the actions,
+     and the mute button keeps its own 40px. */
+  .np__controls .vol {
+    flex: 1 1 auto;
+    min-width: 96px;
+    width: auto;
+    gap: 2px;
+  }
+  .np--docked .vol__bar {
+    height: 4px;
+    min-width: 0;
+    flex: 1 1 auto;
+    width: auto;
+    max-width: 72px;
+    /* 10px each side gives a 24px hit box. The old 20px made a 44px-tall slider that visually
+       dominated a 4px channel; the volume button beside it still carries a full 44px target. */
+    padding: 10px 0;
+    border: 0;
+    box-shadow: none;
+    background:
+      linear-gradient(#0071e3, #0071e3) 0 50% / var(--pct, 0%) 4px no-repeat,
+      linear-gradient(rgb(0 0 0 / 14%), rgb(0 0 0 / 14%)) 0 50% / 100% 4px no-repeat;
+  }
+  .np--docked .vol__bar::-webkit-slider-thumb {
+    width: 12px;
+    height: 12px;
+  }
+  .np--docked .vol__bar::-moz-range-thumb {
+    width: 12px;
+    height: 12px;
+  }
+  .np--docked .prog {
+    width: 100%;
+  }
+  .np--docked .prog__t {
+    min-width: 34px;
+  }
+  .np__controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+  .card,
+  .search,
+  .shelf,
+  .go,
+  .queue {
+    padding: 14px 12px;
+  }
+  .rec {
+    grid-template-columns: 20px 64px minmax(0, 1fr) auto;
+    grid-template-areas:
+      'rank art text dur'
+      'sub sub sub tier'
+      'actions actions actions actions';
+    column-gap: 8px;
+    row-gap: 4px;
+    padding: 8px 8px 6px;
+  }
+  .rec__tier {
+    text-align: right;
+    align-self: start;
+  }
+  .rec__dur {
+    align-self: center;
+  }
+  .why,
+  .rec__savemenu {
+    grid-column: 1 / -1;
+  }
+  .iconbtn {
+    width: 40px;
+    height: 40px;
+  }
+  /* The card's own controls stay a 36px circle so all six fit one line, in a box a full 44px
+     tall so the vertical target is real. See the base rule for why width gives. */
+  .rec__actions .iconbtn,
+  .track__actions .iconbtn {
+    width: 36px;
+    height: 36px;
+  }
+  .whybtn,
+  .openlink {
+    min-height: 40px;
+    padding: 0 12px;
+    display: inline-flex;
+    align-items: center;
+  }
+  .rec__actions .whybtn {
+    min-height: 44px;
+    padding: 0 10px;
+  }
+  /* At the narrowest phone widths the six controls need the gap back. */
+  @media (max-width: 360px) {
+    .rec__actions {
+      gap: 4px;
+    }
+    .rec__actions .whybtn {
+      padding: 0 8px;
+    }
+  }
+  .track {
+    flex-wrap: wrap;
+  }
+  .track__dur {
+    display: none;
+  }
+  .settings .pref {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .settings .pref > .k {
+    text-align: left;
+    font-weight: 700;
+  }
+  .go__sample {
+    margin-left: 0;
+  }
+  /* Touch-sized controls on narrow screens, whatever the pointer reports. */
+  .search__field,
+  .search__field .field,
+  .search__form .push {
+    min-height: 44px;
+  }
+  .push,
+  .addbtn,
+  .seg__btn {
+    min-height: 40px;
+  }
+  .shelf .linkbtn {
+    min-height: 40px;
+    padding: 0 8px;
+  }
+  .dial input[type='range'] {
+    /* The thumb needs a 44px touch target, but the track is painted 6px tall, centred in it. */
+    height: 44px;
+    background: linear-gradient(to right, var(--aqua-mid) var(--pct, 50%), #dcdcd8 var(--pct, 50%)) center / 100% 6px no-repeat;
+  }
+}
+@media (max-width: 480px) {
+  .listen {
+    flex-wrap: wrap;
+  }
+  .listen__actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+  .side__item span {
+    display: none;
+  }
+  .brand__name {
+    display: none;
+  }
+  .dial__end {
+    font-size: 11px;
+  }
+  .push--big {
+    width: 100%;
+  }
+  /* on a phone every starting song stays in view: the shelf stacks instead of scrolling sideways */
+  .shelf__list {
+    flex-direction: column;
+    overflow-x: visible;
+  }
+  .seed {
+    width: auto;
+  }
+}
+@media (pointer: coarse) {
+  .addbtn,
+  .push {
+    min-height: 40px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Volume (UX: now-playing controls). Speaker button, 0-100 slider, number. */
+.vol {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+.vol__btn {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+@media (hover: hover) {
+.vol__btn:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.07);
+}
+}
+.vol__btn:disabled,
+.vol__bar:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.vol__bar {
+  min-width: 60px;
+  /* A 7px channel is hard to hit: the clickable area is 23px tall, the drawn channel stays 7px (NP-STRIP-003). */
+  box-sizing: content-box;
+  padding: 8px 0;
+  background-clip: content-box;
+}
+.vol__n {
+  flex: none;
+  width: 3ch;
+  text-align: right;
+  color: var(--ink-3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+@media (pointer: coarse) {
+  /* UX: volume controls are finger-sized on touch screens. */
+  .vol__btn {
+    width: 44px;
+    height: 44px;
+  }
+  .vol__bar {
+    box-sizing: content-box;
+    padding: 12px 0;
+    background-clip: content-box;
+    box-shadow: none;
+  }
+}
+
+/* ------------------------------------------------------------------ downloads */
+.dl__form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: end;
+}
+.dl__lbl {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.dl__lbl--grow {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+.dl__lbl .field {
+  min-width: 0;
+  width: 100%;
+  /* The search field already reserves 44px; these controls are tapped on a phone too, so they match.
+     Without this a native <select> renders 22px tall, half the minimum touch target. */
+  min-height: 44px;
+  padding: 6px 10px;
+}
+.dl__note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink-2);
+  /* The chosen format's tradeoff in full. It wraps here, which a closed <select> cannot do. */
+  max-width: 62ch;
+}
+.dl__tools {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.dl__tool.is-bad {
+  color: var(--danger);
+}
+.dl__why {
+  display: block;
+}
+.dl__job .meter {
+  margin-top: 6px;
+}
+.side__item .count {
+  margin-left: auto;
+}
+
+/* ------------------------------------------------------------------ Taste Picker (Profile > Taste map) */
+.tpick {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.tpick__head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tpick__title {
+  font-size: 1.3rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+  /* The dot sits on the first line of the name, and stays there when the name wraps. */
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+/* The genre's colour as the map paints it. A ring keeps a pale hue visible on the white panel. */
+.tpick__swatch {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.22);
+  /* Baseline alignment would hang a bare circle too low against the cap height. */
+  transform: translateY(1px);
+}
+.tpick__readout {
+  font-size: 13px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.tpick__axes {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.tpick__field {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 342 / 260;
+  border-radius: 18px;
+  overflow: hidden;
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+  box-shadow: inset 0 0 0 1px var(--hair);
+  background:
+    linear-gradient(to top, rgba(11, 11, 16, 0.85) 0%, rgba(11, 11, 16, 0.4) 45%, rgba(255, 255, 255, 0) 100%),
+    linear-gradient(
+      to right,
+      hsl(0 90% 62%), hsl(30 90% 62%), hsl(60 90% 62%), hsl(90 90% 62%), hsl(120 90% 62%),
+      hsl(150 90% 62%), hsl(180 90% 62%), hsl(210 90% 62%), hsl(240 90% 62%), hsl(270 90% 62%),
+      hsl(300 90% 62%), hsl(330 90% 62%), hsl(360 90% 62%)
+    );
+}
+.tpick__field:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.tpick__dot {
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  margin: -11px 0 0 -11px;
+  border-radius: 50%;
+  border: 3px solid #fff;
+  box-shadow: 0 0 0 6px rgba(255, 255, 255, 0.18), 0 4px 14px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+  transform: translate(0, 0);
+}
+.tpick__fams {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  text-align: center;
+}
+.tpick__fams span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tpick__fams span[aria-current='true'] {
+  color: currentColor;
+}
+.tpick__card {
+  border: 1px solid var(--hair);
+  border-radius: 14px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tpick__card h3 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+.tpick__sound {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.tpick__kv {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px 12px;
+  margin: 0;
+  font-size: 13px;
+  align-items: center;
+}
+.tpick__kv dt {
+  color: var(--ink-2);
+}
+.tpick__kv dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.tpick__meter {
+  display: block;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--pearl);
+  overflow: hidden;
+}
+.tpick__meter i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+.tpick__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 4px;
+}
+.tpick__row h4 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+}
+.tpick__hint {
+  font-size: 12px;
+  color: var(--ink-2);
+  font-weight: 500;
+}
+.tpick__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.tpick__chip {
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--hair);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+.tpick__chip[data-fit='1'] {
+  color: currentColor;
+}
+.tpick__chip[aria-pressed='true'] {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+}
+.tpick__catalog {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.tpick__fam {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid var(--hair);
+}
+.tpick__fam header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.tpick__fam header i {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--fam-color, hsl(var(--fh) 90% 62%));
+  flex-shrink: 0;
+}
+/* TAGS-COLOR-001: each subgenre chip carries its tag colour. */
+.tpick__chip-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 6px;
+  border-radius: 50%;
+  vertical-align: 0;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.18);
+}
+.tpick__fam header b {
+  font-size: 14px;
+}
+.tpick__fam header span {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.tpick__fam p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-2);
+  line-height: 1.45;
+}
+@media (max-width: 480px) {
+  .tpick__fams {
+    font-size: 9px;
+    letter-spacing: 0;
+  }
+}
+.tpick__step {
+  position: absolute;
+  /* The cover art has to be readable: at 22px the owner could not tell what the picture was.
+     A square with a soft radius shows more of the artwork than a circle crops away. */
+  width: var(--tp-marker, 42px);
+  height: var(--tp-marker, 42px);
+  margin: calc(var(--tp-marker, 42px) / -2) 0 0 calc(var(--tp-marker, 42px) / -2);
+  border-radius: 10px;
+  background: rgba(11, 11, 16, 0.85);
+  border: 2px solid #fff;
+  color: #fff;
+  overflow: hidden;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+.tpick__step img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.tpick__step i {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 9px 0 0 0;
+  background: rgba(11, 11, 16, 0.92);
+  color: #fff;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 800;
+  line-height: 15px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.tpick__step--now {
+  width: calc(var(--tp-marker, 42px) * 4 / 3);
+  height: calc(var(--tp-marker, 42px) * 4 / 3);
+  margin: calc(var(--tp-marker, 42px) * -2 / 3) 0 0 calc(var(--tp-marker, 42px) * -2 / 3);
+  border-radius: 12px;
+  border-color: #fff;
+  box-shadow:
+    0 0 0 3px rgba(255, 255, 255, 0.28),
+    0 2px 10px rgba(0, 0, 0, 0.45);
+}
+
+/* Your sound (UX: taste visualiser). Gradient bar of the genre families the user keeps, redrawn on every
+   learned song. Colour is always paired with a name and a percent. Motion is a width/opacity transition
+   only, which the global reduced-motion rule above switches off. */
+.sound {
+  background: var(--panel);
+  border: 1px solid var(--hair);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 12px 14px 10px;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.sound__head {
+  all: unset;
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  margin: -6px -4px 0;
+  padding: 6px 4px;
+  cursor: pointer;
+  border-radius: 8px;
+}
+.sound__head:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+.sound__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.sound__sum {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.sound__chev {
+  display: grid;
+  place-items: center;
+  color: var(--ink-2);
+}
+.sound__live {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--hair);
+}
+.sound__live.is-on {
+  background: #1d7f3c;
+  box-shadow: 0 0 0 3px rgba(29, 127, 60, 0.18);
+}
+@property --c0 { syntax: '<color>'; inherits: false; initial-value: transparent; }
+@property --c1 { syntax: '<color>'; inherits: false; initial-value: transparent; }
+@property --c2 { syntax: '<color>'; inherits: false; initial-value: transparent; }
+@property --c3 { syntax: '<color>'; inherits: false; initial-value: transparent; }
+@property --c4 { syntax: '<color>'; inherits: false; initial-value: transparent; }
+@property --c5 { syntax: '<color>'; inherits: false; initial-value: transparent; }
+@property --c6 { syntax: '<color>'; inherits: false; initial-value: transparent; }
+@property --c7 { syntax: '<color>'; inherits: false; initial-value: transparent; }
+@property --p0 { syntax: '<percentage>'; inherits: false; initial-value: 0%; }
+@property --p1 { syntax: '<percentage>'; inherits: false; initial-value: 0%; }
+@property --p2 { syntax: '<percentage>'; inherits: false; initial-value: 0%; }
+@property --p3 { syntax: '<percentage>'; inherits: false; initial-value: 0%; }
+@property --p4 { syntax: '<percentage>'; inherits: false; initial-value: 0%; }
+@property --p5 { syntax: '<percentage>'; inherits: false; initial-value: 0%; }
+@property --p6 { syntax: '<percentage>'; inherits: false; initial-value: 0%; }
+@property --p7 { syntax: '<percentage>'; inherits: false; initial-value: 0%; }
+
+.sound__bar {
+  height: 14px;
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--pearl-2);
+}
+.sound__bar.is-pulse {
+  animation: sound-pulse 900ms ease-out;
+}
+@keyframes sound-pulse {
+  from { filter: brightness(1.08); }
+  to { filter: none; }
+}
+/* One gradient across the whole bar. Colours and stop positions come from CSS variables set from the
+   taste, so a change transitions the gradient itself. */
+.sound__grad {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg,
+    var(--c0) var(--p0),
+    var(--c1) var(--p1),
+    var(--c2) var(--p2),
+    var(--c3) var(--p3),
+    var(--c4) var(--p4),
+    var(--c5) var(--p5),
+    var(--c6) var(--p6),
+    var(--c7) var(--p7));
+  /* Blended in OKLCH so the middle passes through real hues, not grey; the line above is the fallback. */
+  background: linear-gradient(90deg in oklch,
+    var(--c0) var(--p0),
+    var(--c1) var(--p1),
+    var(--c2) var(--p2),
+    var(--c3) var(--p3),
+    var(--c4) var(--p4),
+    var(--c5) var(--p5),
+    var(--c6) var(--p6),
+    var(--c7) var(--p7));
+  transition: --c0 900ms ease, --p0 900ms ease, --c1 900ms ease, --p1 900ms ease, --c2 900ms ease, --p2 900ms ease, --c3 900ms ease, --p3 900ms ease, --c4 900ms ease, --p4 900ms ease, --c5 900ms ease, --p5 900ms ease, --c6 900ms ease, --p6 900ms ease, --c7 900ms ease, --p7 900ms ease;
+}
+.sound__grad--empty {
+  background: repeating-linear-gradient(90deg, var(--hair-2) 0 8px, transparent 8px 14px);
+}
+.sound__changes {
+  margin: 0;
+  min-height: 20px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.sound__chg {
+  font-weight: 600;
+}
+.sound__chg--up {
+  color: #1d7f3c;
+}
+.sound__chg--down {
+  color: #a63232;
+}
+.sound__chg--new {
+  color: var(--accent);
+}
+.sound__body {
+  display: grid;
+  gap: 12px;
+  padding-top: 4px;
+  border-top: 1px solid var(--hair-2);
+}
+.sound__fams {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+.sfam__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.sfam__dot,
+.schip__dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+.sfam__name {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  color: var(--ink);
+}
+.sfam__pct {
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+.sfam__track {
+  height: 6px;
+  margin-top: 5px;
+  border-radius: 3px;
+  background: var(--pearl-2);
+  overflow: hidden;
+}
+.sfam__fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  transition: width 600ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.sfam__subs {
+  list-style: none;
+  margin: 7px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.schip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 9px;
+  border: 1px solid var(--hair);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--ink);
+  background: var(--pearl);
+}
+.schip b {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+.sound__facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.sound__facts b {
+  color: var(--ink);
+}
+.sound__histh {
+  margin: 0 0 6px;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.sound__histh span {
+  font-weight: 400;
+  color: var(--ink-3);
+}
+.ribbon {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  gap: 2px;
+  height: 36px;
+}
+.ribbon__col {
+  flex: 1;
+  min-width: 0;
+}
+.ribbon__stack {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+}
+.sound__note,
+.sound__empty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+@media (max-width: 480px) {
+  .sound {
+    padding: 10px 12px 8px;
+  }
+  .sound__sum {
+    font-size: 11px;
+  }
+}
+
+/* ------------------------------------------------------------------ phone polish
+   Measured on a 412px Android WebView: the formula <pre> stretched the page to 1148px, the capability
+   table scrolled sideways, and most controls were under 44px. Rules below apply to phones and touch only;
+   the desktop layout is untouched. */
+.formula {
+  margin: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  background: var(--pearl);
+  border: 1px solid var(--hair);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.card > *,
+.main > * {
+  min-width: 0;
+}
+@media (max-width: 899px) {
+  .main {
+    gap: 16px;
+  }
+  /* Row headers keep whole words: `anywhere` lets auto-sized columns shrink below a word and split it mid-letter. */
+  .ptable tbody th {
+    overflow-wrap: break-word;
+  }
+  /* Phone header: the tab bar is the fixed bottom bar set above (no top-strip grid here). */
+  .side__item span {
+    display: block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .side__item .count {
+    position: absolute;
+    margin-left: 22px;
+    margin-top: -4px;
+  }
+  .side__item {
+    position: relative;
+  }
+  .sound {
+    padding: 14px 12px;
+    gap: 12px;
+  }
+  .sound__head {
+    min-height: 44px;
+  }
+  .sound__sum {
+    font-size: 12px;
+  }
+
+  /* The capability table becomes one card per source: no sideways scrolling on a phone. */
+  .captable {
+    overflow: visible;
+    border: 0;
+    gap: 10px;
+  }
+  .captable__row--head {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+  .captable__row {
+    min-width: 0;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    border: 1px solid var(--hair);
+    border-radius: 10px;
+    padding: 6px 4px;
+  }
+  .captable__row:last-child {
+    border-bottom: 1px solid var(--hair);
+  }
+  .captable__row > span {
+    min-width: 0;
+    padding: 6px 8px;
+    overflow-wrap: anywhere;
+  }
+  .captable__row > .captable__src {
+    grid-column: 1 / -1;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--hair-2);
+    margin-bottom: 2px;
+  }
+  .captable__row > .cap::before {
+    content: attr(data-label);
+    display: block;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--ink-3);
+  }
+}
+@media (pointer: coarse), (max-width: 899px) {
+  /* Finger-sized targets (44px). The visible track and thumb stay as drawn; the hit area grows. */
+  .go__fresh,
+  .chk {
+    min-height: 44px;
+  }
+  .go__fresh input,
+  input[type='checkbox'] {
+    width: 22px;
+    height: 22px;
+    flex: none;
+  }
+  .field--num {
+    min-height: 44px;
+    font-size: 16px;
+    box-sizing: border-box;
+  }
+  .iconbtn {
+    width: 44px;
+    height: 44px;
+  }
+  .tpick__chip,
+  .whybtn,
+  .openlink {
+    min-height: 44px;
+  }
+}
+
+@media (max-width: 899px) {
+  /* Docked player (phone and narrow window): art and title take the whole top row; transport and volume share the row under it. */
+  :root {
+    --dock-h: 150px;
+  }
+  .np--docked {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 4px;
+  }
+  .np--docked .np__dockctl {
+    width: auto;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: center;
+    row-gap: 2px;
+  }
+  /* DOCK-CENTRE-001: the five transport buttons used to share one flex row with volume and
+     song actions, so their centre moved whenever those controls changed width or vanished.
+     Keep transport centred under the full progress bar; utilities occupy their own short row. */
+  .np--docked .np__controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    grid-template-rows: minmax(44px, auto) 44px;
+    column-gap: 0;
+    row-gap: 0;
+    width: 100%;
+  }
+  .np--docked .np__controls .transport {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: center;
+  }
+  .np--docked .np__controls .vol {
+    grid-column: 1;
+    grid-row: 2;
+    justify-self: start;
+  }
+  .np--docked .np__controls .np__track-actions {
+    /* Span the row, not the narrow right 1fr track. At 320px three actions are wider than that
+       track and otherwise painted outside the viewport even though the page had no scroll bar. */
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-self: end;
+  }
+}
+
+/* ------------------------------------------------------------------ desktop: the player is a bar fixed to the bottom
+   The panel used to follow the last song down the page. On a wide window it now stays in view while the list scrolls:
+   a frosted bar edge to edge (the same surface and hairline as the top bar), the strip itself kept to the page width. */
+@media (min-width: 900px) {
+  .rail {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 30;
+    padding: 10px 24px calc(10px + env(safe-area-inset-bottom));
+    background: rgba(250, 249, 247, 0.92);
+    backdrop-filter: blur(10px);
+    border-top: 1px solid var(--hair);
+    box-shadow: 0 -6px 20px rgba(30, 30, 30, 0.06);
+  }
+  .rail .np--panel {
+    max-width: 872px;
+    margin: 0 auto;
+  }
+  /* Room under the last song so the bar never covers it. */
+  .app.has-strip {
+    padding-bottom: calc(var(--strip-h, 120px) + 24px);
+  }
+  .app.has-strip .toast {
+    bottom: calc(var(--strip-h, 120px) + 16px);
+  }
+  /* Nothing playing: the bar is one slim line, not a tall empty card. */
+  .np--panel.is-empty {
+    padding: 8px 14px;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: 'idle';
+  }
+  .np--panel.is-empty .np__idle {
+    grid-area: idle;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    margin: 0;
+    padding: 0;
+  }
+  .np--panel.is-empty .np__idleart {
+    width: 28px;
+    height: 28px;
+    flex: none;
+  }
+}
+
+/* QUEUE-CTRL-001: whether this song's audio is on local disk.
+   A 3px rail on the row's bottom edge, plus a glyph over the artwork corner. It deliberately does
+   NOT tint the row background: that is already carrying the playing, hover, focus and selected
+   states, and a fifth meaning there would both collide and risk the title's contrast. */
+.rec__dl {
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 3px;
+  pointer-events: none;
+}
+.rec__dl-rail {
+  display: block;
+  height: 100%;
+  /* DL-GRADIENT-001: full-width gradient layer revealed by clip-path, so the colour at a point on
+     the rail means the same share of the file on every row. */
+  width: 100%;
+  border-radius: 0 2px 2px 0;
+  background: linear-gradient(to right, var(--dl-from), var(--dl-to));
+  clip-path: inset(0 calc(100% - var(--dl, 0%)) 0 0);
+  transition: clip-path 220ms linear;
+}
+/* These states fill the whole rail and carry their own flat colour, so no clip and no gradient. */
+/* Ready is the quiet, common case: a full hairline, not a shout. */
+.rec__dl[data-dl='ready'] .rec__dl-rail { background: var(--accent-soft); clip-path: none; }
+/* READY-PLAY-001: a quiet blue tint means a full local file is ready, not merely resolvable.
+   The existing check and accessible readiness text remain; colour is an additional cue. */
+.rec__actions .iconbtn.playbtn[data-ready='true'] {
+  /* ROW-PLAY-001: the same light blue fill as every other list (row-play.css); the old #e6effb was too faint. */
+  background: #bcd8ff;
+  /* PLAY-DISC-001: the shorthand above resets the clip to the border box, which painted the fill into
+     the transparent 44px target borders: a 36 x 44 pill whose blue sat off the ring's circle. */
+  background-clip: content-box;
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px #8fbcf5;
+}
+.rec__dl[data-dl='failed'] .rec__dl-rail,
+.rec__dl[data-dl='blocked'] .rec__dl-rail { width: 100%; background: var(--danger); opacity: 0.5; clip-path: none; }
+.rec__dl[data-dl='queued'] .rec__dl-rail { width: 100%; background: var(--hair); clip-path: none; }
+/* ROW-CHECK-001: a drawn mark on the artwork's corner, so the state survives without colour vision. It
+   lives inside the artwork button: pinned to the row's corner it landed on the Play button on a phone
+   and floated under the artwork on Windows. The grid centres the icon whatever the platform's font. */
+.rec__dl-mark {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--panel);
+  border: 1px solid var(--hair);
+  color: var(--ink-2);
+  line-height: 0;
+  pointer-events: none;
+}
+.rec__dl-mark[data-dl='ready'] { color: var(--accent); border-color: #b8cff0; }
+.rec__dl-mark[data-dl='failed'],
+.rec__dl-mark[data-dl='blocked'] { color: var(--danger); }
+@media (prefers-reduced-motion: reduce) {
+  .rec__dl-rail { transition: none; }
+}
+
+/* The kept-music path can be long, and Android can only report a label, never a real path. */
+.qdl__path {
+  display: block;
+  overflow-wrap: anywhere;
+  color: var(--ink-2);
+}
+/* Saved rows carry the rail and the screen-reader text only; they render no mark. */
+/* Downloading, but the job has not reported a percent yet. A 0%-wide bar reads as stalled and a
+   smooth fake animation would be inventing progress, so this shows motion WITHOUT a number. */
+.rec__dl[data-indeterminate] .rec__dl-rail {
+  width: 35%;
+  /* No clip: there is no percent to reveal, and clipping to --dl: 0% would hide the sweep. */
+  clip-path: none;
+  animation: rec-dl-sweep 1.4s ease-in-out infinite;
+}
+@keyframes rec-dl-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(286%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* No motion allowed: fall back to a full, quiet bar that simply means "working". */
+  .rec__dl[data-indeterminate] .rec__dl-rail { width: 100%; animation: none; opacity: 0.45; }
+}
+
+/* ALBUM-SEARCH-001 / ALBUM-OPEN-001: albums in search, the album view, and its numbered songs.
+   A tab's own view stays mounted behind an open album; the pane adds no box of its own to .main's grid. */
+.tabpane {
+  display: contents;
+}
+.tabpane[hidden] {
+  display: none;
+}
+.albums {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+/* A song with no album keeps the album button's place empty, so the row's columns still line up. */
+.album-gap {
+  visibility: hidden;
+}
+.albums__h {
+  font-size: 12px;
+  margin: 0;
+  color: var(--ink-2);
+}
+.album-row {
+  padding: 0;
+}
+.album-row__open {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 56px;
+  padding: 7px 10px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+@media (hover: hover) {
+.album-row__open:hover {
+  background: var(--accent-soft);
+}
+}
+.album-row__open:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.album-row__open > .glyph {
+  flex: none;
+  color: var(--ink-2);
+}
+/* ALBUM-SEARCH-002: the line naming the service wraps on a phone instead of losing the service. */
+.album-row .track__meta {
+  display: block;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+/* The separator and the service name move to the next line together, never split. */
+.album-row__src {
+  white-space: nowrap;
+}
+.albums__more {
+  justify-self: start;
+  min-height: 44px;
+}
+.album__bar {
+  display: flex;
+}
+.album__back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 44px;
+}
+.album__head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 16px;
+  align-items: end;
+}
+.album__text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.album__kind {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+/* The owner's rule for titles and artists holds here too: they wrap, never cut off. */
+.card .album__title {
+  font-size: 22px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+.album__artist {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.album__meta {
+  color: var(--ink-2);
+  font-size: 12px;
+}
+/* ALBUM-SEARCH-002: which service the album came from. */
+.album__src {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--ink-2);
+  font-size: 12px;
+}
+/* ARTIST-SOURCES-001: one row per platform, saying what the page shows from it. Text, not buttons. */
+.artist__sources {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 3px 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.artist__source {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+.artist__source > .aqua-icon {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+.artist__source-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.artist__source-name {
+  color: var(--ink);
+  font-weight: 600;
+}
+.artist__source-miss {
+  color: var(--ink);
+}
+/* ARTIST-ALL-SOURCES-001: the other platforms being asked, and the ones that had no page. Quieter
+   than the rows above: they report, they give nothing to read from. */
+.artist__source--wait {
+  align-items: center;
+}
+.artist__source--wait > .sdot {
+  flex: 0 0 auto;
+}
+.artist__also {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.album__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.album__actions .push {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+}
+.album .tracks {
+  max-height: none;
+}
+/* The song the player has, marked in an album or search list the way the queue marks it. */
+.track.is-playing {
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.track__num {
+  flex: none;
+  min-width: 1.6em;
+  text-align: right;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+/* On a phone the cover stays beside the title, smaller, so the songs start above the player. */
+@media (max-width: 480px) {
+  .album__head {
+    gap: 12px;
+    align-items: center;
+  }
+  .album__head > .art {
+    width: 76px !important;
+    height: 76px !important;
+  }
+  .card .album__title {
+    font-size: 18px;
+  }
+}
+
+/* ALBUM-SAVE-001: Save album shows when the album is in Saved. */
+.album__actions .push[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/*
+ * LIST-SAVE-FOLDER-001: a running download counts up. It is progress, not an unavailable button, so its
+ * text keeps full ink, and its digits keep one width so the button does not jump as the count grows.
+ */
+.push[aria-busy='true'] {
+  font-variant-numeric: tabular-nums;
+  cursor: progress;
+}
+.push[aria-busy='true'][aria-disabled='true'] {
+  color: var(--ink);
+}
+/* LIST-SAVE-FOLDER-001: the busy button keeps the push look; aria-disabled only blocks a second press. */
+.push[aria-disabled='true'] {
+  pointer-events: auto;
+}
+/* The folder button beside it is a full 44px target at every width (the desktop icon button is 30px). */
+.list-save__folder {
+  min-width: 44px;
+  min-height: 44px;
+}
+/* LIST-SAVE-FOLDER-001: where the songs went, on its own line under the list's buttons. */
+.list-save__note {
+  flex-basis: 100%;
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.4;
+}
+/* ARTIST-PAGE-001: an artist named on a song opens their page. The name still reads as part of the
+   line (it wraps, never cuts off); the hit area reaches 6px above and below without moving the text,
+   and the keyboard focus ring is the app's accent outline. */
+.artistlink {
+  appearance: none;
+  display: inline;
+  margin: -6px 0;
+  padding: 6px 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 2px;
+}
+@media (hover: hover) {
+.artistlink:hover {
+  color: var(--accent);
+  text-decoration-color: currentColor;
+}
+}
+.artistlink:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 3px;
+}
+/* The album page's artist: a full 44px target, as its other buttons are. */
+.artistlink--head {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  justify-self: start;
+  min-height: 44px;
+  margin: -6px 0;
+  padding: 0;
+  text-align: left;
+}
+/* An artist's picture is round, which tells it apart from an album cover at a glance. */
+.artist-pic {
+  display: inline-flex;
+  flex: none;
+}
+.artist-pic .art {
+  border-radius: 50%;
+  /* A hairline ring keeps a picture on a white background from melting into the card. */
+  box-shadow: 0 0 0 1px var(--hair);
+}
+/* Each part of the artist's line ("148 songs") stays whole; the line breaks between parts. */
+.artist__part {
+  white-space: nowrap;
+}
+/* ARTIST-FEATURES-001: the line under Features, saying what the list is without claiming more.
+   --ink-2, not --ink-3: measured in the window, 11px on --ink-3 reads at 2.86:1, under the 4.5:1
+   this app holds itself to; --ink-2 measures 6.86:1, like the artist line beside it. */
+.artist__hint {
+  font-size: 11px;
+  margin: 0;
+  color: var(--ink-2);
+}
+/* On a phone the picture gives the name and its line the room: 72px, not 112px. */
+@media (max-width: 480px) {
+  .artist .album__head .artist-pic .art {
+    width: 72px !important;
+    height: 72px !important;
+  }
+}
+.artist__more {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+}
+.artist__more:empty {
+  display: none;
+}
+
+/* RESULT-TYPES-001: the icon menu that narrows search results and an artist's discography. */
+.typefilter {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin: 4px 0 10px;
+  flex-wrap: wrap;
+}
+.typefilter__btn {
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 32px;
+  border-radius: 9px;
+  border: 1px solid var(--hair);
+  background: var(--panel);
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease, transform 0.08s ease;
+}
+@media (hover: hover) {
+.typefilter__btn:hover { border-color: var(--accent); color: var(--ink); }
+}
+.typefilter__btn:active { transform: scale(0.95); }
+.typefilter__btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.typefilter__btn.is-on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.typefilter__btn.is-empty { opacity: 0.45; }
+@media (pointer: coarse) {
+  .typefilter__btn { width: 44px; height: 40px; }
+}
+
+/* ARTIST-REFRESH-002: trailing icon separated from Back, with the common 44px target. */
+.artist__bar { display:flex; align-items:center; justify-content:space-between; gap:24px; }
+.artist__refresh { margin-left:auto; flex:0 0 44px; width:44px; height:44px; display:grid; place-items:center; }
+.artist__refresh[aria-busy=true] svg { animation:radio-refresh-spin .85s linear infinite; }
+@media (prefers-reduced-motion:reduce) { .artist__refresh[aria-busy=true] svg { animation:none; } }
+
+/* ARTIST-PLAY-ICON-001: the artist page play controls are icon-only round targets; the verb lives
+   in the accessible name. A 44px circle keeps the touch target the HIG minimum. */
+.artist__play,
+.artist__section-play {
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ============================================================================
+   Radio-specific additions (Radio.tsx) — appended; see RADIO-TOP-001 / RADIO-SKEL-001.
+   ============================================================================ */
+/* RADIO-TOP-001: while station rows stream in, the browser must never adopt the footer as a
+   scroll anchor and throw the page to the bottom; the directory always reads from the top. */
+.radio-page { overflow-anchor: none; }
+/* RADIO-SKEL-001: each newly arrived station row develops in (Skeleton.tsx <Develop>). The
+   animation wrapper takes over the li's two-column grid so the row layout is unchanged. */
+ul.radio-stations > li.radio-station { display: block; }
+ul.radio-stations > li.radio-station > .skel-develop { display: grid; grid-template-columns: 52px minmax(0, 1fr); align-items: start; gap: 16px; }
+@media (max-width: 760px) {
+  ul.radio-stations > li.radio-station > .skel-develop { grid-template-columns: 40px minmax(0, 1fr); gap: 12px; }
+}
+/* RADIO-UI-011: the station's play button sits on one row with the location and the now-playing
+   line, vertically centred on them. The button keeps its 44px target and never shrinks; the text
+   column takes the rest and may shrink to nothing, so a long title is cut with an ellipsis rather
+   than pushing the button off the row (checked at 320, 390, 768 and 1440px wide). */
+/* ROW-UNIFY-001 (owner, 2026-11-19): Play and Star moved to one row of buttons under the text, the
+   same as every song row (song-row.css); the text lines below keep their single-line rules. */
+.radio-station__info > .radio-location { margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.radio-station__info > .radio-now { min-width: 0; overflow-wrap: normal; }
+/* The 4px padding gives the artist and song links' focus ring room inside the clipped box. */
+.radio-now > .radio-now__text { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-block: 4px; margin-block: -4px; }
+.radio-now__text > .radio-now__link { overflow-wrap: normal; }
+/* RADIO-UI-012: the owner asked for the station's tags and name on the play button's row too. The
+   row is [play][info], and the info column holds four single lines: the name (with its star), the
+   location, the now-playing line and the tags, all centred on the 44px button. Every line keeps to
+   one line and ends in an ellipsis, so a long name, title or tag never wraps, overflows or pushes the
+   button off the row, and a row keeps its height while its song changes (no jump on a live update).
+   The (at most three) tag bubbles sit 6px apart so they never touch, and may each shrink to an
+   ellipsis; they stay on one line (no wrap) so the row keeps its height. */
+.radio-station__info > h2 { display: flex; align-items: center; gap: 4px; min-width: 0; margin: 0; overflow-wrap: normal; }
+.radio-station__info > h2 > .radio-station__name { flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-block: 2px; margin-block: -2px; }
+/* POLISH-ICONS-001: the station star was a text glyph clipped into the bottom 28px of a 44px box next
+   to the name (its place moved with the name's length). It is now a drawn star in the row of buttons. */
+.radio-station__info > .radio-now { flex-direction: row; align-items: baseline; gap: 6px; }
+.radio-station__info > .radio-station__tags { display: flex; flex-wrap: nowrap; align-items: center; gap: 6px; min-width: 0; margin-top: 4px; overflow: hidden; }
+.radio-station__tags > .genre { display: inline-block; flex: 0 1 auto; min-width: 0; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.radio-station__tags > .genre::before { display: inline-block; vertical-align: -1px; margin-right: 5px; }
+.radio-station__body > .radio-station__details { margin-top: 2px; }

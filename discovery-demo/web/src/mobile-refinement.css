@@ -1,0 +1,327 @@
+/*
+ * Mobile refinement: the flat, quiet controls the player and the Your sound card share.
+ *
+ * Imported by SoundCard.tsx so it loads with the app bundle. Everything here is expressed in the
+ * demo's existing variables (styles.css) and the Aqua window kit's (--ink, --focus, --danger,
+ * --success): the block below only gives those values the short names this file uses.
+ * Every moving part is wrapped in a reduced-motion guard.
+ */
+:root {
+  /* Quiet wash for a hover or a pressed control: the accent, barely there. */
+  --tint-1: var(--hair-2);
+  --tint-2: var(--accent-soft);
+  --accent-ink: var(--accent);
+  --accent-hair: #c7dbf5;
+  --ok-ink: var(--success);
+  --bad-ink: var(--danger);
+}
+
+/* ------------------------------------------------------------------ quiet controls */
+/* One flat button for small actions: no gloss, no shadow, a 44px touch target, and a visible press. */
+.quiet-control {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--ink-2);
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease,
+    transform 90ms ease;
+}
+@media (hover: hover) {
+.quiet-control:hover:not(:disabled) {
+  background: var(--tint-1);
+  color: var(--ink);
+}
+}
+.quiet-control:active:not(:disabled) {
+  transform: scale(0.94);
+  background: var(--tint-2);
+}
+.quiet-control:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.quiet-control:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.quiet-control[aria-pressed='true'] {
+  background: var(--tint-2);
+  color: var(--accent-ink);
+  border-color: var(--accent-hair);
+}
+
+/* The download button's own states: working spins a thin ring, done goes quiet green. */
+.quiet-control[data-download-state='done'] {
+  color: var(--ok-ink);
+}
+.quiet-control[data-download-state='error'] {
+  color: var(--bad-ink);
+}
+.action-progress {
+  position: absolute;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2px solid var(--accent-hair);
+  border-top-color: var(--accent-ink);
+  animation: action-spin 760ms linear infinite;
+}
+.np__track-actions .quiet-control {
+  position: relative;
+}
+@keyframes action-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ------------------------------------------------------------------ player actions */
+.np__track-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+.np__action-error {
+  font-size: 11px;
+  color: var(--bad-ink);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* On the phone the actions share the controls row; the error text drops below it. */
+@media (max-width: 899px) {
+  .np--docked .np__track-actions {
+    justify-content: flex-end;
+    /* Never stretch and never wrap: the transport keeps its size, the volume channel yields. */
+    flex: 0 0 auto;
+    gap: 2px;
+    margin-left: auto;
+  }
+  .np--docked .np__track-actions .quiet-control {
+    min-width: 36px;
+    min-height: 44px;
+  }
+  .np--docked .np__action-error {
+    display: none;
+  }
+}
+
+/* DOCK-SHUFFLE-001: shuffle and repeat stay in the phone dock. Five transport buttons, three
+   actions and a mute button fill a 412px row; a phone sets its level with the hardware rocker,
+   so the slider is what gives way on narrow screens — the mute button stays. */
+@media (max-width: 599px) {
+  .np--docked .np__controls .vol {
+    flex: 0 0 auto;
+    min-width: 0;
+    width: auto;
+  }
+  .np--docked .np__controls .vol__bar {
+    display: none;
+  }
+}
+@media (max-width: 379px) {
+  /* VOLUME-POP-001 (owner, 2026-11-19): the volume is one icon that opens a slider, so it stays even
+     here. The controls share the row equally (player-inline.css PLAYER-SIMILAR-001). */
+}
+/* DOCK-NARROW-001: a 320px phone has 296px of row. The eight controls at their 360px sizes need 330, so
+   the last action (Download) hung 23px off the right edge. Every control keeps its 44px height; the
+   widths give way: 32 + 36 + 44 + 36 + 32 with 2px gaps = 188, 6px, three 32px actions = 100. */
+@media (max-width: 359px) {
+  .np--docked .tbtn {
+    width: 36px;
+  }
+  .np--docked .tbtn--main {
+    width: 44px;
+  }
+  .np--docked .tbtn--mode {
+    width: 32px;
+  }
+  .np--docked .np__track-actions .quiet-control {
+    min-width: 32px;
+  }
+}
+
+/* ------------------------------------------------------------------ genre ticker */
+/* TICKER-MARQUEE-001: the owner asked the header to scroll through the genres, strongest first.
+   The run is rendered twice and the track travels exactly -50%, so the wrap is seamless. */
+.genre-ticker {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  min-height: 32px;
+}
+.genre-ticker__window {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  /* Fade both edges so a label slides in and out instead of being chopped at the boundary. The
+     mask only applies while scrolling, or a line that fits would have faded ends for no reason. */
+}
+.genre-ticker.is-scrolling .genre-ticker__window {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 18px, #000 calc(100% - 18px), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 18px, #000 calc(100% - 18px), transparent);
+}
+.genre-ticker__track {
+  display: flex;
+  align-items: center;
+  width: max-content;
+}
+.genre-ticker.is-scrolling .genre-ticker__track {
+  animation: ticker-scroll var(--ticker-duration, 24s) linear infinite;
+}
+/* Hover, focus, a hidden tab or reduced motion PAUSE the scroll; the genres stay on screen. */
+.genre-ticker.is-still .genre-ticker__track {
+  animation-play-state: paused;
+}
+.genre-ticker__run {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: 18px;
+  padding-right: 18px;
+}
+.genre-ticker__entry {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  font-size: 13px;
+  color: var(--ink);
+  white-space: nowrap;
+}
+.genre-ticker__entry > b {
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+  font-weight: 600;
+}
+.genre-ticker__entry > i {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  border-radius: 50%;
+}
+.genre-ticker__empty {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-3);
+}
+@keyframes ticker-scroll {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    /* Exactly one copy of the run, so copy two lands where copy one began. */
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+
+/* ------------------------------------------------------------------ taste history */
+/* A single blended field rather than separate columns; the exact shares stay in the rows and the readout. */
+.taste-history {
+  position: relative;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--tint-1);
+  border: 1px solid var(--hair);
+}
+.taste-history__gradient {
+  display: block;
+  width: 100%;
+  height: 62px;
+}
+/* The scrubber sits over the field: an invisible full-size track with a visible head. */
+.taste-history__scrub {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  appearance: none;
+  background: transparent;
+  cursor: ew-resize;
+}
+.taste-history__scrub::-webkit-slider-thumb {
+  appearance: none;
+  width: 14px;
+  height: 56px;
+  border-radius: 7px;
+  border: 2px solid rgba(255, 255, 255, 0.92);
+  background: rgba(0, 0, 0, 0.22);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
+  cursor: ew-resize;
+}
+.taste-history__scrub::-moz-range-thumb {
+  width: 14px;
+  height: 56px;
+  border-radius: 7px;
+  border: 2px solid rgba(255, 255, 255, 0.92);
+  background: rgba(0, 0, 0, 0.22);
+}
+.taste-history__scrub:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.taste-history__axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--ink-3);
+  margin-top: 3px;
+}
+.taste-history__caption {
+  margin: 2px 0 0;
+  font-size: 10px;
+  color: var(--ink-3);
+}
+.taste-history__detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--ink-2);
+}
+.taste-history__detail > time {
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-3);
+}
+
+/* ------------------------------------------------------------------ search sliders */
+/* The tuning sliders belong to the search they adjust, so on a phone they carry no panel of
+   their own: no shadow, no border, no second background behind the card above them. */
+@media (max-width: 899px) {
+  .go {
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    padding: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .quiet-control {
+    transition: none;
+    animation: none;
+  }
+  /* The marquee is paused, not removed: the genres stay readable rather than vanishing. The
+     component also watches this query, so .is-still is set in JS; this is the CSS-only guarantee. */
+  .genre-ticker__track {
+    animation-play-state: paused;
+  }
+  .action-progress {
+    animation-duration: 2400ms;
+  }
+}

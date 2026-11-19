@@ -1,0 +1,59 @@
+/* LIST-AVAILABILITY-001. Astra: inline desktop, stacked touch layout. Existing Aqua tokens. */
+.list-availability { margin: 10px 0; padding: 12px; border: 1px solid var(--well-edge); border-radius: 8px; background: var(--panel, white); color: var(--ink); min-width: 0; }
+.list-availability__head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.list-availability__count { flex: 1; min-width: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+/* LIST-METER-003: no border. The 1px well-edge outline read as a hard black box around the bar on
+   both platforms; the track's own fill is enough to show its extent. */
+.list-availability__meter { height: 10px; margin-top: 10px; border-radius: 6px; background: var(--track-lo); overflow: hidden; }
+.list-availability__meter > span {
+  display: block;
+  height: 100%;
+  /* DL-GRADIENT-001: the gradient is painted across the FULL track and revealed by clip-path, so
+     a colour at a given x always means the same share of the list. Sizing the layer to --available
+     would rescale it, making 10% ready and 100% ready both end green. */
+  width: 100%;
+  background: linear-gradient(to right, var(--dl-from), var(--dl-to));
+  clip-path: inset(0 calc(100% - var(--available)) 0 0);
+}
+.list-availability__help { color: var(--ink-2); margin: 8px 0 0; font-size: 12px; overflow-wrap: anywhere; }
+
+/* LIST-METER-002: a spinning arrow while the cache moves. Clockwise = loading in,
+   anticlockwise = unloading. Drawn as a ring with a gap plus an arrowhead, so the direction is
+   legible without an icon font, and it carries the same blue->green download colours. */
+.list-availability__spin {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid var(--dl-from);
+  /* The gap is what makes the rotation visible on a circle. */
+  border-right-color: transparent;
+  position: relative;
+  animation: la-spin 900ms linear infinite;
+}
+/* The arrowhead: a small triangle riding the ring, pointing the way the cache is moving. */
+.list-availability__spin::after {
+  content: '';
+  position: absolute;
+  top: -3px;
+  left: 7px;
+  border: 3px solid transparent;
+  border-left-color: var(--dl-to);
+}
+.list-availability__spin[data-dir='unload'] {
+  animation-direction: reverse;
+  border-color: var(--ink-2);
+  border-right-color: transparent;
+}
+.list-availability__spin[data-dir='unload']::after { border-left-color: transparent; border-right-color: var(--ink-2); }
+@keyframes la-spin { to { transform: rotate(360deg); } }
+/* Motion is the only signal here, so when it is unwelcome the arrow holds still rather than
+   vanishing - a static ring still says "something is in flight". */
+@media (prefers-reduced-motion: reduce) {
+  .list-availability__spin { animation: none; }
+}
+@media (max-width: 560px) {
+  /* The head is now a count plus a small spinner, so it stays on one line even on a narrow phone. */
+  .list-availability__head { gap: 6px; }
+}
+/* No shimmer or fill transition: every width is the current disk-backed count, including decreases. */

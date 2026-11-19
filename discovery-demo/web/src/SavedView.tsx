@@ -1,0 +1,521 @@
+import { classifyStation } from './engine/radio-genres';
+import type { RadioStation } from './engine/radio';
+import { useEffect, useId, useRef, useState, type CSSProperties } from 'react';
+import { Glyph } from '@now-playing/aqua-ui/icons';
+
+import { api, type AlbumSummary, type ArtistTarget, type Characteristics, type PlaylistMix, type PlaylistSummary, type SavedItem, type Track } from './api';
+import { Art } from './Art';
+import { ListDownloadBar } from './ListDownloadBar';
+import { ListSaveButton } from './ListSaveButton';
+import { albumFolderName } from './engine/list-save';
+import { SaveMenu } from './SaveMenu';
+import { SongStar, inPlaylist } from './SongStar';
+import { SimilarGlyph } from './icons';
+import { ALBUM_KIND } from './AlbumShelf';
+import { SongCredits } from './SongCredits';
+import { SoundCard } from './SoundCard';
+import { listMixNote } from './list-mix-note';
+import { PLAYLIST_NAME_MAX } from './engine/playlists';
+import type { CardCache } from './engine/queue-controls';
+import { classNames, genreBubbles } from './util';
+import { GenreBubbleView } from './Results';
+import { RowPlayButton, playOnDoubleClick } from './RowPlay';
+import { Marquee } from './Marquee';
+import { ROW_COVER } from './row-cover';
+import { listStrip, listTaste } from './list-strip';
+import './save-menu.css';
+import './saved-lists.css';
+import './list-strip.css';
+
+interface Props {
+  saved: SavedItem[] | null;
+  lists: PlaylistSummary[];
+  onLists: (lists: PlaylistSummary[]) => void;
+  /** `listId` is the list the play started from, so the engine can apply that list's rule. */
+  onPreview: (track: Track, listId?: string) => void;
+  /** SHUFFLE-START-001: play the whole saved album; the app chooses the song it starts on. */
+  onPlayAll?: (list: Track[], listId: string) => void;
+  onRemoveSaved: (track: Track) => void;
+  onDownload?: (track: Track) => void;
+  /** Per-song cache state for the row rail; absent where there is no local downloader. */
+  cacheOf?: (key: string) => CardCache | null;
+  onVisibleList?: (id: string) => void;
+  /** PLAYLIST-QUEUE-001: put this list in the now playing queue, its songs as the starting songs. */
+  onUseAsQueue?: (id: string) => void;
+  /** The list now in the now playing queue, if any. */
+  queueListId?: string | null;
+  /** ALBUM-OPEN-001: open the album a song is on. */
+  onOpenAlbum?: ((t: Track) => void) | undefined;
+  /** ALBUM-SAVE-001: open a saved album's full album page. */
+  onOpenAlbumId?: ((id: string) => void) | undefined;
+  /** ARTIST-PAGE-001: each artist named on a song opens that artist's page. */
+  onOpenArtist?: ((t: ArtistTarget) => void) | undefined;
+  /** ROW-UNIFY-001: Find similar sound, as on a Discover row. */
+  onSimilar?: ((t: Track) => void) | undefined;
+  similarBusy?: boolean;
+}
+
+const ALL = 'all';
+
+/**
+ * PLAYLISTS-001. Saved songs, plus the lists the listener makes out of them.
+ *
+ * "All saved" is every liked song and cannot be renamed or deleted; the named lists are theirs.
+ * There is deliberately no per-song "Add" button here: a single saved song is not a starting song,
+ * and the owner asked for that control to go. A whole list can become the now playing queue instead,
+ * and then every song in it is a starting song (PLAYLIST-QUEUE-001).
+ */
+export function SavedView({ saved, lists, onLists, onPreview, onPlayAll, onRemoveSaved, onDownload, cacheOf, onVisibleList, onUseAsQueue, queueListId, onOpenAlbum, onOpenAlbumId, onOpenArtist, onSimilar, similarBusy }: Props) {
+  const [view, setView] = useState<string>(ALL);
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState('');
+  const [renaming, setRenaming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [menuFor, setMenuFor] = useState<string | null>(null);
+  const scroller = useRef<HTMLDivElement | null>(null);
+  /** A chip pressed at the edge of a sideways row is brought fully into view, so the open list or
+   *  album is never half off the card (ALBUM-SAVE-001; the lists row had the same flaw). */
+  const open = (id: string, chip: HTMLElement) => {
+    setView(id);
+    const still = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+    chip.scrollIntoView?.({ inline: 'nearest', block: 'nearest', behavior: still ? 'auto' : 'smooth' });
+  };
+  const newId = useId();
+  const renameId = useId();
+
+  const current = lists.find((l) => l.id === view) ?? null;
+  // ALBUM-SAVE-001: saved albums have their own row; the listener's own lists keep theirs.
+  const ownLists = lists.filter((l) => !l.album);
+  const albums = lists.filter((l) => l.album);
+  const albumOf = current?.album ?? null;
+  // PLAYLIST-MIX-001: the open list's own sound, read again when its songs change.
+  const [mix, setMix] = useState<PlaylistMix | null>(null);
+  // IMPORT-GENRES-001: and again as the background lookup gives its songs genres.
+  const tagged = current ? current.items.filter((i) => Array.isArray(i.track?.tags) && i.track!.tags!.length).length : 0;
+  const mixSig = current ? `${current.id}:${current.items.map((i) => i.key).join(',')}:${tagged}` : '';
+  useEffect(() => {
+    if (!current || !current.count) return;
+    let live = true;
+    api.playlistMix(current.id).then((m) => live && setMix(m), () => undefined);
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mixSig]);
+  const shown = current && mix?.id === current.id ? mix : null;
+  // LIST-STRIP-001: what the list's own song tags say, so the strip draws as soon as any song has a
+  // stated genre, even before the engine's mix answer comes back.
+  const ownTaste = current ? listTaste(current.items.map((i) => i.track)) : null;
+  const pendingOf = (l: PlaylistSummary) => Number((l as PlaylistSummary & { genre_pending?: number }).genre_pending ?? 0);
+  const looking = current ? pendingOf(current) : 0;
+  // IMPORT-GENRES-001: while the engine is still looking up imported songs, read the lists again now
+  // and then so their genres, covers and strips fill in without the listener doing anything.
+  const anyPending = lists.some((l) => pendingOf(l) > 0);
+  useEffect(() => {
+    if (!anyPending) return;
+    let live = true;
+    const t = window.setInterval(() => {
+      api.playlists().then((r) => live && onLists(r.lists), () => undefined);
+    }, 4000);
+    return () => {
+      live = false;
+      window.clearInterval(t);
+    };
+  }, [anyPending, onLists]);
+  useEffect(() => { onVisibleList?.(view); }, [view, onVisibleList]);
+
+  // A list deleted elsewhere must not leave the page showing an empty mystery.
+  useEffect(() => {
+    if (view !== ALL && !lists.some((l) => l.id === view)) setView(ALL);
+  }, [lists, view]);
+
+  const run = async (fn: () => Promise<{ lists: PlaylistSummary[] }>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      onLists((await fn()).lists);
+      return true;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'That did not work.');
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const create = async () => {
+    const clean = name.trim();
+    if (!clean) {
+      setError('Give the list a name.');
+      return;
+    }
+    if (await run(() => api.playlistEdit('create', { name: clean }))) {
+      setName('');
+      setCreating(false);
+      // A new list is appended, so on a phone it lands past the right edge of the swipe row.
+      requestAnimationFrame(() => {
+        const el = scroller.current;
+        if (el) el.scrollTo({ left: el.scrollWidth, behavior: 'smooth' });
+      });
+    }
+  };
+
+  const rename = async () => {
+    const clean = name.trim();
+    if (!current || !clean) return;
+    if (await run(() => api.playlistEdit('rename', { id: current.id, name: clean }))) {
+      setName('');
+      setRenaming(false);
+    }
+  };
+
+  const remove = async () => {
+    if (!current) return;
+    if (await run(() => api.playlistEdit('delete', { id: current.id }))) setView(ALL);
+  };
+
+  // What the chosen view shows. A list holds keys, so its songs come from the saved rows where
+  // possible and from the engine's own copy of the track otherwise.
+  const byKey = new Map((saved ?? []).map((s) => [s.track.key, s.track]));
+  const rows: { track: Track; played?: boolean; characteristics?: Characteristics }[] =
+    current === null
+      // TAGS-ALWAYS-001: the engine sends every saved song's genres worked out (as a Discover row).
+      ? (saved ?? []).map((s) => ({ track: s.track, characteristics: s.characteristics }))
+      : current.items
+          // IMPORT-GENRES-001: an imported song's list copy carries the cover and genres it was given.
+          .map((i) => ({ track: (String(i.track?.provider) === 'imported' ? i.track : byKey.get(i.key) ?? i.track) as Track | null, played: i.played, characteristics: (i as typeof i & { characteristics?: Characteristics }).characteristics }))
+          .filter((r): r is { track: Track; played: boolean; characteristics: Characteristics | undefined } => Boolean(r.track));
+
+  return (
+    <section className="card" aria-labelledby="saved-h">
+      <h2 id="saved-h">Saved</h2>
+
+      <div className="lists" role="group" aria-label="Your saved lists">
+        {/* One row on a phone, swiped sideways for the lists that do not fit. The create field is
+            deliberately outside the scroller: a text input inside it would be unusable. */}
+        <div className="lists__scroll" ref={scroller}>
+          <button
+            className={classNames('lists__tab', view === ALL && 'is-on')}
+            type="button"
+            aria-pressed={view === ALL}
+            onClick={() => setView(ALL)}
+          >
+            <Glyph name="heart" size={13} /> All saved
+            <span className="lists__count">{saved?.length ?? 0}</span>
+          </button>
+          {ownLists.map((l) => (
+            <button
+              key={l.id}
+              className={classNames('lists__tab', view === l.id && 'is-on')}
+              type="button"
+              aria-pressed={view === l.id}
+              onClick={(e) => open(l.id, e.currentTarget)}
+            >
+              {l.name}
+              <span className="lists__count">{l.count}</span>
+              {/* LIST-STRIP-001: the list's colour strip, from its songs' genres (empty until any has one). */}
+              <ListStripBar tracks={l.items.map((i) => i.track)} />
+            </button>
+          ))}
+          {!creating && (
+            <button className="lists__add" type="button" onClick={() => { setCreating(true); setName(''); setError(null); }}>
+              <Glyph name="add" size={13} /> New list
+            </button>
+          )}
+        </div>
+      </div>
+
+      {albums.length > 0 && (
+        <div className="lists lists--albums" role="group" aria-label="Your saved albums">
+          <h3 className="lists__h">Albums</h3>
+          <div className="lists__scroll">
+            {albums.map((l) => (
+              <button
+                key={l.id}
+                className={classNames('lists__tab lists__album', view === l.id && 'is-on')}
+                type="button"
+                aria-pressed={view === l.id}
+                aria-label={`${l.name} by ${l.album!.artist}, ${l.count} ${l.count === 1 ? 'song' : 'songs'}`}
+                onClick={(e) => open(l.id, e.currentTarget)}
+              >
+                <Art src={l.album!.artwork} size={30} />
+                <span className="lists__album-text">
+                  <span className="lists__album-title">{l.name}</span>
+                  <span className="lists__album-artist">{l.album!.artist}</span>
+                </span>
+                <span className="lists__count">{l.count}</span>
+                <ListStripBar tracks={l.items.map((i) => i.track)} />
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {creating && (
+        <div className="lists__create">
+          <label className="vh" htmlFor={newId}>
+            New list name
+          </label>
+          <input
+            id={newId}
+            className="field"
+            autoFocus
+            value={name}
+            maxLength={PLAYLIST_NAME_MAX}
+            placeholder="Late night"
+            disabled={busy}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                void create();
+              }
+              if (e.key === 'Escape') {
+                setCreating(false);
+                setName('');
+                setError(null);
+              }
+            }}
+          />
+          <button className="push" type="button" disabled={busy || !name.trim()} onClick={() => void create()}>
+            Create
+          </button>
+          <button className="linkbtn" type="button" onClick={() => { setCreating(false); setName(''); setError(null); }}>
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {error && (
+        <p className="banner banner--bad" role="alert">
+          {error}
+        </p>
+      )}
+
+      {current && albumOf && (
+        <div className="lists__bar lists__bar--album">
+          <p className="lists__state">
+            {[ALBUM_KIND[albumOf.kind as AlbumSummary['kind']] ?? 'Album', albumOf.artist, albumOf.year].filter(Boolean).join(' · ')}
+          </p>
+          {rows.length > 0 && (
+            <button className="push push--default" type="button" onClick={() => (onPlayAll ? onPlayAll(rows.map((r) => r.track), current.id) : onPreview(rows[0]!.track, current.id))}>
+              <Glyph name="play" size={12} /> Play album
+            </button>
+          )}
+          {onUseAsQueue && current.count > 0 && (
+            queueListId === current.id ? (
+              <span className="lists__inqueue">In your now playing queue</span>
+            ) : (
+              <button className="push" type="button" title="Replace your now playing queue with this album. Every song in it becomes a starting song, and new music is found from them. You can bring your queue back." onClick={() => onUseAsQueue(current.id)}>
+                Play as my queue
+              </button>
+            )
+          )}
+          {current.count > 0 && <ListSaveButton tracks={rows.map((r) => r.track)} kind="album" name={albumFolderName(current.name, albumOf.artist)} label={`the album ${current.name}`} />}
+          {onOpenAlbumId && (
+            <button className="linkbtn" type="button" onClick={() => onOpenAlbumId(albumOf.id)}>
+              Open album
+            </button>
+          )}
+          <button className="linkbtn linkbtn--bad" type="button" disabled={busy} onClick={() => void remove()}>
+            Remove album
+          </button>
+        </div>
+      )}
+
+      {current && !albumOf && (
+        <div className="lists__bar">
+          {renaming ? (
+            <>
+              <label className="vh" htmlFor={renameId}>
+                Rename {current.name}
+              </label>
+              <input
+                id={renameId}
+                className="field"
+                autoFocus
+                value={name}
+                maxLength={PLAYLIST_NAME_MAX}
+                disabled={busy}
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    void rename();
+                  }
+                  if (e.key === 'Escape') setRenaming(false);
+                }}
+              />
+              <button className="push" type="button" disabled={busy || !name.trim()} onClick={() => void rename()}>
+                Save name
+              </button>
+              <button className="linkbtn" type="button" onClick={() => setRenaming(false)}>
+                Cancel
+              </button>
+            </>
+          ) : (
+            <>
+              {/* Why this list is or is not asking for more songs — the owner's rule, stated. */}
+              <p className="lists__state">
+                {current.count === 0
+                  ? 'Empty. Like a song and pick this list to fill it.'
+                  : current.discovery_ready
+                    ? 'You have played everything here, so discovery may add to it.'
+                    : `${current.unplayed} of ${current.count} still to play. Discovery waits until you have heard them all.`}
+              </p>
+              {onUseAsQueue && current.count > 0 && (
+                queueListId === current.id ? (
+                  <span className="lists__inqueue">In your now playing queue</span>
+                ) : (
+                  <button className="push push--default" type="button" title="Replace your now playing queue with this list. Every song in it becomes a starting song, and new music is found from them. You can bring your queue back." onClick={() => onUseAsQueue(current.id)}>
+                    <Glyph name="play" size={12} /> Play as my queue
+                  </button>
+                )
+              )}
+              {/* LIST-SAVE-FOLDER-001: the whole list, downloaded into a folder of its own. */}
+              {current.count > 0 && <ListSaveButton tracks={rows.map((r) => r.track)} kind="list" name={current.name} label={`“${current.name}”`} />}
+              <button className="linkbtn" type="button" onClick={() => { setRenaming(true); setName(current.name); setError(null); }}>
+                Rename
+              </button>
+              <button className="linkbtn linkbtn--bad" type="button" disabled={busy} onClick={() => void remove()}>
+                Delete list
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      {current && current.count > 0 && (
+        <ListStripBar tracks={current.items.map((i) => i.track)} header pending={looking} />
+      )}
+
+      {current && current.count > 0 && (
+        <SoundCard
+          key={current.id}
+          taste={shown?.taste ?? ownTaste?.taste ?? null}
+          listening={false}
+          title={`Sound of “${current.name}”`}
+          label="This list's mix"
+          historyKey={`airwave.sound.list.${current.id}`}
+          idleText={shown ? listMixNote(shown) : 'Reading the list…'}
+          emptyText={looking
+            ? `Looking up the genres of ${looking} ${looking === 1 ? 'song' : 'songs'} in this list. The mix fills in as they arrive.`
+            : shown ? `No genre known yet for the ${shown.songs} songs in this list. Play it as your queue and discovery looks them up.` : 'Reading the list…'}
+        />
+      )}
+
+      {saved == null ? (
+        <p className="state">
+          <span className="sdot sdot--busy" aria-hidden="true" /> Loading…
+        </p>
+      ) : rows.length === 0 ? (
+        <p className="empty">{current ? 'Nothing in this list yet.' : 'Songs you like appear here.'}</p>
+      ) : (
+        <>
+        <ListDownloadBar tracks={rows.map((r) => r.track)} label={current ? current.name : 'All saved'} />
+        <ul className="well tracks tracks--saved">
+          {rows.map(({ track, played, characteristics }) => {
+            const cache = cacheOf?.(track.key) ?? null;
+            // IMPORT-GENRES-001 / SAVED-GENRES-001: every saved song the engine placed shows its genre bubbles.
+            // RADIO-GENRES-001: a programme bookmark shows what its station broadcasts (a format, not a song genre).
+            const station = (track as Track & { radio_station?: RadioStation }).radio_station;
+            const bubbles = track.kind === 'radio-programme' && station
+              ? classifyStation({ tags: station.tags ?? [], name: station.name, language: station.language, countryCode: station.countryCode })
+              : genreBubbles(characteristics);
+            return (
+            <li key={track.key} className="track" data-dl={cache?.state} onDoubleClick={playOnDoubleClick(() => onPreview(track, current?.id))}
+              style={cache ? ({ '--dl': `${cache.progress}%` } as CSSProperties) : undefined}>
+              {cache && (
+                <span className="rec__dl" data-dl={cache.state} data-indeterminate={cache.indeterminate || undefined}>
+                  <span className="rec__dl-rail" aria-hidden="true" />
+                  <span className="sr">{cache.keptText ? `${cache.text}. ${cache.keptText}.` : `${cache.text}.`}</span>
+                </span>
+              )}
+              <Art src={track.artwork} size={ROW_COVER} />
+              <div className="track__text">
+                <Marquee className="track__title" title={track.title}>{track.title}</Marquee>
+                <SongCredits track={track} onOpenAlbum={onOpenAlbum} onOpenArtist={onOpenArtist} />
+                {bubbles.length > 0 && (
+                  <span className="rec__facts list-strip__facts" aria-label="Song details">
+                    {bubbles.map((g) => <GenreBubbleView key={g.label} bubble={g} />)}
+                  </span>
+                )}
+              </div>
+              {current && (
+                <span className={classNames('track__played', played && 'is-on')}>
+                  {played ? 'Played' : 'Not played'}
+                </span>
+              )}
+              <span className="track__actions">
+                {/* ROW-UNIFY-001 / STAR-MENU-001 (owner, 2026-11-19): the Discover row's order - Play, star
+                    (the saved-list menu), X, Download, Find similar - so the three lists work alike. */}
+                <RowPlayButton track={track} cache={cache} onPlay={() => onPreview(track, current?.id)} />
+                <button
+                  className={classNames('iconbtn', menuFor === track.key && 'is-on')}
+                  type="button"
+                  aria-expanded={menuFor === track.key}
+                  aria-label={`Choose lists for ${track.title}${inPlaylist(track.key, lists) ? ' — saved to a playlist' : ''}`}
+                  title="Save to lists"
+                  onClick={() => setMenuFor(menuFor === track.key ? null : track.key)}
+                >
+                  <SongStar saved={inPlaylist(track.key, lists)} />
+                </button>
+                {/* A saved album keeps the album's songs (ALBUM-SAVE-001); it is removed whole. */}
+                {!albumOf && <button
+                  className="iconbtn"
+                  type="button"
+                  aria-label={current ? `Remove ${track.title} from ${current.name}` : `Remove ${track.title} from Saved`}
+                  title={current ? `Remove from ${current.name}` : 'Remove from Saved'}
+                  onClick={() => {
+                    if (current) void run(() => api.playlistEdit('remove', { id: current.id, key: track.key }));
+                    else onRemoveSaved(track);
+                  }}
+                >
+                  <Glyph name="close" size={14} />
+                </button>}
+                {onDownload && (
+                  <button className="iconbtn" type="button" aria-label={`Download ${track.title}`} title="Download" onClick={() => onDownload(track)}>
+                    <Glyph name="download" size={14} />
+                  </button>
+                )}
+                {onSimilar && (
+                  <button className="iconbtn rec__similar" type="button" onClick={() => onSimilar(track)} disabled={similarBusy} aria-label={`Find similar sound to ${track.title}`} title="Find similar sound">
+                    <SimilarGlyph size={16} />
+                  </button>
+                )}
+              </span>
+              {menuFor === track.key && (
+                <div className="track__savemenu">
+                  <SaveMenu songKey={track.key} title={track.title} lists={lists} onLists={onLists} onClose={() => setMenuFor(null)} />
+                </div>
+              )}
+            </li>
+            );
+          })}
+        </ul>
+        </>
+      )}
+    </section>
+  );
+}
+
+/**
+ * LIST-STRIP-001: a list's colour strip - the Sound card's gradient (same palette, same mapping)
+ * drawn from the list's songs' stated genres. Neutral and labelled honestly until any song has one.
+ */
+function ListStripBar({ tracks, header = false, pending = 0 }: { tracks: (Track | null)[]; header?: boolean; pending?: number }) {
+  const s = listStrip(tracks);
+  const words = s.gradient
+    ? `Genre mix: ${s.label}${s.placed < s.songs ? ` (${s.placed} of ${s.songs} songs placed)` : ''}`
+    : pending > 0 ? 'Genre mix: looking up genres' : `Genre mix: ${s.label.toLowerCase()}`;
+  return (
+    <span
+      className={classNames('list-strip', header && 'list-strip--header', !s.gradient && 'list-strip--empty')}
+      role="img"
+      aria-label={words}
+      title={words}
+      style={s.gradient ? ({ '--list-strip': s.gradient } as CSSProperties) : undefined}
+    />
+  );
+}

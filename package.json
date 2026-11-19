@@ -1,0 +1,86 @@
+{
+  "name": "now-playing-suite",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Now Playing — an offline-first music player PWA, a self-hosted hub, and a Windows companion, sharing versioned contracts.",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=22.12.0",
+    "pnpm": ">=10"
+  },
+  "scripts": {
+    "dev": "concurrently -n player,hub -c blue,green \"pnpm dev:player\" \"pnpm dev:hub\"",
+    "dev:player": "pnpm --filter @now-playing/music-player dev",
+    "dev:hub": "pnpm --filter @now-playing/hub dev",
+    "dev:windows": "pnpm --filter @now-playing/windows-companion dev",
+    "build": "pnpm -r --filter './packages/*' build && pnpm build:player && pnpm build:hub && pnpm build:windows && pnpm build:helper",
+    "build:packages": "pnpm -r --filter './packages/*' build",
+    "build:player": "pnpm build:packages && pnpm --filter @now-playing/music-player build",
+    "build:hub": "pnpm build:packages && pnpm --filter @now-playing/hub build",
+    "build:windows": "pnpm build:packages && pnpm --filter @now-playing/windows-companion build",
+    "build:helper": "pnpm build:packages && pnpm --filter @now-playing/local-helper build",
+    "generate": "pnpm --filter @now-playing/contracts generate && pnpm --filter @now-playing/test-fixtures generate",
+    "lint": "eslint . --max-warnings=0",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "pnpm -r --workspace-concurrency=4 typecheck",
+    "test": "pnpm test:unit && pnpm test:dom && pnpm test:contracts && pnpm test:integration",
+    "test:unit": "vitest run --project unit",
+    "test:integration": "vitest run --project integration",
+    "test:contracts": "vitest run --project contracts",
+    "test:a11y": "pnpm --filter @now-playing/music-player test:a11y && pnpm --filter @now-playing/hub test:a11y",
+    "test:e2e": "pnpm --filter @now-playing/music-player test:e2e && pnpm --filter @now-playing/hub test:e2e && pnpm --filter @now-playing/aqua-ui test:e2e",
+    "build:window-css": "python packages/aqua-ui/scripts/make-window-css.py",
+    "test:journey": "playwright test --config tests/journey/playwright.config.ts",
+    "test:journey:container": "node scripts/journey-container.mjs",
+    "test:security": "vitest run --project security",
+    "verify": "node scripts/verify.mjs",
+    "test:dom": "vitest run --project dom",
+    "test:perf": "vitest run --project perf",
+    "build:local": "pnpm build:packages && pnpm --filter @now-playing/music-player build:local",
+    "test:local": "pnpm --filter @now-playing/music-player test:local",
+    "build:styleguide": "pnpm --filter @now-playing/aqua-ui build:styleguide",
+    "styleguide:build": "pnpm build:styleguide",
+    "styleguide:check": "node scripts/styleguide-check.mjs",
+    "styleguide:pdf": "node scripts/export-styleguide-pdf.mjs",
+    "styleguide:shell": "node scripts/styleguide-shell-shots.mjs",
+    "mockups:build": "tsx scripts/mockups/cli.mjs build",
+    "mockups:diff": "tsx scripts/mockups/cli.mjs diff",
+    "mockups:export": "tsx scripts/mockups/cli.mjs export",
+    "mockups:record-hub": "tsx scripts/mockups/record-hub.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "1.62.1",
+    "@types/node": "26.4.1",
+    "concurrently": "10.0.5",
+    "eslint": "10.9.1",
+    "eslint-plugin-jsx-a11y": "6.10.2",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "globals": "17.12.0",
+    "prettier": "3.9.6",
+    "rimraf": "6.1.3",
+    "tsx": "4.23.13",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.69.0",
+    "vitest": "5.0.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "undici@>=6.7.0 <6.28.1": "^6.28.1",
+      "undici@>=7.0.0 <7.29.1": "^7.29.1",
+      "brace-expansion@<1.1.20": "^1.1.20",
+      "brace-expansion@>=2.0.0 <2.1.6": "^2.1.6",
+      "brace-expansion@>=4.0.0 <5.0.11": "^5.0.11",
+      "source-map-js@>=1.0.0 <1.2.2": "^1.2.2",
+      "shell-quote@>=1.8.4 <1.11.0": "^1.11.0"
+    },
+    "auditConfig": {
+      "ignoreGhsas": [
+        "GHSA-ch52-4w7c-c8xp"
+      ]
+    }
+  }
+}

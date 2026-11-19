@@ -1,0 +1,724 @@
+'use strict';
+/**
+ * Windows downloaders: yt-dlp and spotDL, run from files shipped inside the app.
+ *
+ * The page names a URL, a tool and a format. Everything else is decided here:
+ *  - the URL must be https and on the tool's host list (mirrored by web/src/engine/downloads.ts;
+ *    download-hosts.test.ts fails when they drift);
+ *  - arguments are an array handed to spawn() with no shell, and the URL comes after `--` so it can
+ *    never be read as an option;
+ *  - `--ignore-config` is first for yt-dlp, so a config file cannot add `--exec`;
+ *  - files are written to a private temp folder, then moved to the user's Music folder.
+ * Background downloads run `parallel` at a time (settable from cache-config, 1-6, default 2, because each
+ * slot is a real yt-dlp process); two foreground jobs, newest first, are always additional to them. Progress is real
+ * (parsed from the tool's own output) or absent, never invented.
+ */
+const { spawn, spawnSync } = require('node:child_process');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const YTDLP_HOSTS = ['youtu.be', 'youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com', 'soundcloud.com', 'www.soundcloud.com', 'm.soundcloud.com', 'on.soundcloud.com', 'audius.co'];
+const YTDLP_SUFFIXES = ['.bandcamp.com'];
+const SPOTDL_HOSTS = ['open.spotify.com'];
+function archiveAudioUrl(u) {
+  if (u.hostname !== 'archive.org' || u.search || u.hash || (u.port && u.port !== '443')) return false;
+  try {
+    const filePath = decodeURIComponent(u.pathname);
+    return !filePath.includes('..') && /^\/download\/[A-Za-z0-9][A-Za-z0-9._-]{1,100}\/[A-Za-z0-9][A-Za-z0-9._ ()&+-]{0,180}\.(?:mp3|m4a|flac)$/i.test(filePath);
+  } catch { return false; }
+}
+// Compared against the RAW link: new URL() drops dot segments and empty ?/# delimiters that
+// Android's java.net.URI keeps, so only a raw===canonical check keeps the three shells identical.
+function hearThisTrackUrl(u, raw) {
+  return u.hostname === 'hearthis.at' && !u.search && !u.hash && (!u.port || u.port === '443') &&
+    raw === `https://hearthis.at${u.pathname}` &&
+    /^\/[A-Za-z0-9][A-Za-z0-9._-]{0,100}\/[A-Za-z0-9][A-Za-z0-9._-]{0,180}\/$/.test(u.pathname);
+}
+/** One slot is one yt-dlp process, so a desktop takes more of them than a phone. */
+const PARALLEL_MIN = 1;
+const PARALLEL_MAX = 6;
+const PARALLEL_DEFAULT = 2;
+const FORMATS = ['mp3', 'm4a', 'opus', 'flac', 'wav', 'original'];
+const SPOTDL_FORMATS = ['mp3', 'm4a', 'opus', 'flac', 'wav'];
+const AUDIO_EXT = new Set(['mp3', 'm4a', 'aac', 'flac', 'opus', 'ogg', 'oga', 'wav', 'webm', 'mka']);
+
+function urlAllowedFor(tool, raw) {
+  let u;
+  try {
+    u = new URL(String(raw));
+  } catch {
+    return false;
+  }
+  if (u.protocol !== 'https:' || u.username || u.password || String(raw).length > 500 || /[\s\x00-\x1f]/.test(String(raw))) return false;
+  const host = u.hostname.toLowerCase();
+  if (tool === 'spotdl') return SPOTDL_HOSTS.includes(host) && /^\/(intl-[a-z]{2}(-[a-z]{2})?\/)?track\/[A-Za-z0-9]{10,30}\/?$/.test(u.pathname);
+  if (tool === 'yt-dlp') return archiveAudioUrl(u) || hearThisTrackUrl(u, String(raw)) || YTDLP_HOSTS.includes(host) || (YTDLP_SUFFIXES.some(s => host.endsWith(s)) && host !== 'www.bandcamp.com' && /^\/track\/[^/]+\/?$/.test(u.pathname));
+  return false;
+}
+
+/** The complete argument list for one job. Nothing here comes from the page except url and format. */
+function buildArgs(tool, url, format, dir, ffmpegPath) {
+  if (tool === 'yt-dlp') {
+    const a = ['--ignore-config', '--no-colors', '--newline', '--no-mtime', '--no-cache-dir', '--no-playlist', '--ffmpeg-location', ffmpegPath, '--paths', dir, '--output', '%(title).180B.%(ext)s', '--extract-audio', '--embed-metadata'];
+    if (format !== 'original') a.push('--audio-format', format);
+    a.push('--', url);
+    return a;
+  }
+  // spotDL has no "keep the original" mode; it converts, so "original" means mp3 here.
+  const fmt = SPOTDL_FORMATS.includes(format) ? format : 'mp3';
+  return ['download', url, '--ffmpeg', ffmpegPath, '--format', fmt, '--output', path.join(dir, '{artists} - {title}.{output-ext}')];
+}
+
+function safeName(name) {
+  const cleaned = String(name).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/[. ]+$/, '').slice(0, 160);
+  return cleaned || 'song';
+}
+
+function uniqueIn(dir, name) {
+  const ext = path.extname(name);
+  const stem = path.basename(name, ext);
+  let candidate = name;
+  for (let i = 2; fs.existsSync(path.join(dir, candidate)); i++) candidate = `${stem} (${i})${ext}`;
+  return path.join(dir, candidate);
+}
+
+function lastMeaningfulLine(text) {
+  const lines = String(text || '')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const err = [...lines].reverse().find((l) => /error/i.test(l));
+  return (err || lines[lines.length - 1] || '').slice(0, 400) || null;
+}
+
+/**
+ * @param {{ toolsDir: string, saveDir: string, tempRoot: string, reveal?: (file: string) => void, spawnImpl?: typeof spawn }} cfg
+ */
+/**
+ * Finished downloads, indexed by the link they were fetched from, so the player can ask "do you
+ * hold this song?" and play it on a deck. Kept as a small JSON file beside the saved songs; entries
+ * whose file has gone are dropped when read.
+ */
+function createLibrary(saveDir) {
+  const file = path.join(saveDir, '.airwave-library.json');
+  let map = null;
+  function load() {
+    if (map) return map;
+    map = new Map();
+    try {
+      for (const [url, p] of Object.entries(JSON.parse(fs.readFileSync(file, 'utf8')))) if (typeof p === 'string') map.set(url, p);
+    } catch {
+      /* no library yet */
+    }
+    return map;
+  }
+  function save() {
+    fs.mkdirSync(saveDir, { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(Object.fromEntries(load())), 'utf8');
+  }
+  return {
+    get(url) {
+      const p = load().get(url);
+      if (!p) return null;
+      if (!fs.existsSync(p)) {
+        load().delete(url);
+        save();
+        return null;
+      }
+      return p;
+    },
+    set(url, p) {
+      load().set(url, p);
+      save();
+    },
+  };
+}
+
+function createDownloads(cfg) {
+  // The queue cache is private and evictable. A deliberate Download is copied to the user's Music
+  // folder and never counted against, or removed by, this limit.
+  const cacheDir = cfg.cacheDir || path.join(cfg.tempRoot, 'audio-cache');
+  fs.mkdirSync(cacheDir, { recursive: true });
+  let saveDir = cfg.saveDir;
+  const library = createLibrary(cfg.libraryDir || saveDir);
+  const cacheIndex = path.join(cacheDir, 'index.json');
+  const cached = new Map();
+  try {
+    for (const [url, entry] of Object.entries(JSON.parse(fs.readFileSync(cacheIndex, 'utf8')))) {
+      if (urlAllowedFor('yt-dlp', url) && entry && typeof entry.name === 'string' && /^[a-f0-9-]{36}\.[a-z0-9]{2,5}$/.test(entry.name)) {
+        const file = path.join(cacheDir, entry.name);
+        if (fs.existsSync(file) && fs.statSync(file).isFile()) cached.set(url, { name: entry.name, display: safeName(entry.display || entry.name), at: Number(entry.at) || 0 });
+      }
+    }
+  } catch { /* first run or invalid index */ }
+  // A crash after moving an audio file but before writing the index must not leave an invisible,
+  // unmetered file behind. This folder is app-private; never scan or remove the user's Music folder.
+  const indexedNames = new Set([...cached.values()].map((e) => e.name));
+  for (const name of fs.readdirSync(cacheDir)) {
+    if (/^[a-f0-9-]{36}\.[a-z0-9]{2,5}$/.test(name) && !indexedNames.has(name)) {
+      const orphan = path.join(cacheDir, name);
+      if (fs.statSync(orphan).isFile()) fs.unlinkSync(orphan);
+    }
+  }
+  let limitBytes = 1024 ** 3;
+  let protectedUrls = new Set();
+  /** url -> position in the listening order the page asked for. Rank 0 plays soonest. */
+  let wantedRank = new Map();
+  let backgroundParallel = PARALLEL_DEFAULT;
+  const cacheBytes = () => [...cached.values()].reduce((n, e) => n + fs.statSync(path.join(cacheDir, e.name)).size, 0);
+  function persistCache() {
+    const file = `${cacheIndex}.tmp`;
+    fs.writeFileSync(file, JSON.stringify(Object.fromEntries(cached)), 'utf8');
+    fs.renameSync(file, cacheIndex);
+  }
+  // Planning and finalization are synchronous: concurrent processes cannot interleave quota/index writes.
+  /**
+   * Retention order, not plain LRU, because the cache rolls along the list being listened to:
+   *  1. files that are no longer in `wanted` at all go first, least recently used among them;
+   *  2. then wanted songs from the TAIL of the playback order backwards, so the songs about to play
+   *     are the last to go instead of an arbitrary oldest next song;
+   *  3. protected live decks are never candidates, and kept copies live in the Music folder, which
+   *     this function never looks at.
+   * A BACKGROUND insert may only take the place of a wanted song that sits LATER in the list than
+   * itself. That is what keeps the window rolling forward: refusing every wanted song deadlocks a
+   * list bigger than the quota (nothing can ever be added again), while allowing any of them lets
+   * two background songs evict each other forever. A FOREGROUND song may evict any wanted song.
+   */
+  function prune(extra = 0, background = false, forUrl = null) {
+    const rankOf = (url) => (wantedRank.has(url) ? wantedRank.get(url) : -1);
+    const mine = forUrl !== null && wantedRank.has(forUrl) ? wantedRank.get(forUrl) : null;
+    const evictable = (url) => {
+      if (protectedUrls.has(url) || url === forUrl) return false;
+      if (!wantedRank.has(url)) return true;
+      if (!background) return true;
+      return mine !== null && wantedRank.get(url) > mine;
+    };
+    let bytes = cacheBytes();
+    const discard = [];
+    const candidates = [...cached].filter(([url]) => evictable(url)).sort((a, b) => {
+      const ra = rankOf(a[0]);
+      const rb = rankOf(b[0]);
+      if ((ra < 0) !== (rb < 0)) return ra < 0 ? -1 : 1;
+      if (ra < 0) return a[1].at - b[1].at || (a[0] < b[0] ? -1 : 1);
+      return rb - ra;
+    });
+    for (const [url, e] of candidates) {
+      if (bytes + extra <= limitBytes) break;
+      discard.push([url, e]);
+      bytes -= fs.statSync(path.join(cacheDir, e.name)).size;
+    }
+    if (bytes + extra > limitBytes) throw new Error('The wanted or protected songs and this download exceed the queue cache limit. Increase it in Settings.');
+    for (const [url, e] of discard) {
+      fs.unlinkSync(path.join(cacheDir, e.name));
+      cached.delete(url);
+    }
+    // ROLLING-CACHE-002: the page re-states the wanted order every couple of seconds so songs the
+    // listener has passed get unloaded promptly. Writing the index on every one of those calls
+    // would rewrite it constantly for nothing, so persist only when the cache actually changed.
+    if (discard.length) persistCache();
+  }
+  function cachedFile(url) {
+    const entry = cached.get(url);
+    if (!entry) return null;
+    const file = path.join(cacheDir, entry.name);
+    if (!fs.existsSync(file)) { cached.delete(url); persistCache(); return null; }
+    if (Date.now() - entry.at > 30_000) { entry.at = Date.now(); persistCache(); }
+    return file;
+  }
+  const exe = (n) => path.join(cfg.toolsDir, `${n}.exe`);
+  const run = cfg.spawnImpl || spawn;
+  /** @type {Map<string, any>} */
+  const jobs = new Map();
+  const active = { background: 0, foreground: 0 };
+  /** Two taps at once, newest first: a tap never waits behind the song the listener just left (DL-FAST-001). */
+  const FOREGROUND_SLOTS = 2;
+  function pump() {
+    for (const lane of ['foreground', 'background']) {
+      // Background songs go in listening order; the listener's own taps newest first.
+      const candidates = lane === 'background' ? [...jobs.values()] : [...jobs.values()].reverse();
+      for (const j of candidates) {
+        // Read the limit per candidate: lowering it mid-flight stops new starts without touching
+        // the processes already running, and raising it takes effect on this same pass.
+        if (active[lane] >= (lane === 'background' ? backgroundParallel : FOREGROUND_SLOTS)) break;
+        if (j.state !== 'queued' || j.cancelled || j.dispatched || (j.background ? 'background' : 'foreground') !== lane) continue;
+        active[lane]++;
+        j.dispatched = true;
+        execute(j).catch(e => fail(j, e.message || String(e))).finally(() => {
+          fs.rm(j.dir, { recursive: true, force: true }, () => undefined);
+          active[lane]--;
+          pump();
+        });
+      }
+    }
+  }
+  let versions = null;
+
+  function probe() {
+    if (versions) return versions;
+    const get = (name, args, pick) => {
+      if (!fs.existsSync(exe(name))) return { id: name, present: false, version: null, method: 'missing', detail: `${name}.exe is not in the app's tools folder.` };
+      const r = spawnSync(exe(name), args, { encoding: 'utf8', timeout: 45_000, windowsHide: true });
+      const out = `${r.stdout || ''}${r.stderr || ''}`;
+      const version = r.status === 0 ? pick(out) : null;
+      return { id: name, present: Boolean(version), version, method: 'the real tool, shipped inside this app', detail: version ? null : `Could not run ${name}.exe: ${lastMeaningfulLine(out) || r.error?.message || 'no output'}` };
+    };
+    versions = [get('yt-dlp', ['--version'], (o) => o.trim().split(/\s+/)[0] || null), get('spotdl', ['--version'], (o) => (/\d+\.\d+\.\d+/.exec(o) || [])[0] || null), get('ffmpeg', ['-version'], (o) => (/version\s+(\S+)/.exec(o) || [])[1] || null)];
+    return versions;
+  }
+
+  function view(j) {
+    return { id: j.id, url: j.url, tool: j.tool, format: j.format, label: j.label, state: j.state, stage: j.stage, percent: j.percent, message: j.message, error: j.error, files: j.files.map((f) => ({ name: f.name, bytes: f.bytes })), saved_to: j.saved_to };
+  }
+
+  function health() {
+    const tools = probe();
+    // The queue cache is the app's real audio footprint. The page shows it next to the limit the
+    // owner sets, so it must come from disk here, not from the WebView's own storage estimate.
+    // `stream`: main.cjs serves /stream-audio, so the page may play a song while it downloads (STREAM-DL-001).
+    return { ready: tools.every((t) => t.present), runs_spotdl: true, tools, saves_to: saveDir, cache_bytes: cacheBytes(), cache_limit_bytes: limitBytes, stream: Boolean(cfg.streams) };
+  }
+
+  function keep(url) {
+    if (!urlAllowedFor('yt-dlp', url)) throw new Error('Not a link this app downloads from.');
+    const ongoing = [...jobs.values()].find((j) => j.url === url && (j.state === 'queued' || j.state === 'running'));
+    if (ongoing) { ongoing.keep = true; return { job: view(ongoing) }; }
+    const source = library.get(url) || cachedFile(url);
+    if (!source) return { job: null };
+    let dest = library.get(url);
+    if (!dest || path.dirname(dest) !== saveDir) {
+      fs.mkdirSync(saveDir, { recursive: true });
+      dest = uniqueIn(saveDir, cached.has(url) ? cached.get(url).display : safeName(path.basename(source)));
+      // Copy first and index only after success: playback stays on its original file/blob.
+      fs.copyFileSync(source, dest);
+      library.set(url, dest);
+    }
+    const j = { id: crypto.randomUUID(), url, tool: 'yt-dlp', format: 'original', label: path.basename(dest), state: 'done', stage: 'done', percent: 100, message: null, error: null, files: [{ name: path.basename(dest), path: dest, bytes: fs.statSync(dest).size }], saved_to: saveDir };
+    jobs.set(j.id, j);
+    return { job: view(j) };
+  }
+
+  function fail(j, reason) {
+    j.state = j.cancelled ? 'cancelled' : 'failed';
+    j.stage = 'done';
+    j.error = j.cancelled ? null : String(reason).slice(0, 600);
+  }
+
+  async function execute(j) {
+    if (j.cancelled) return;
+    const tool = j.tool;
+    if (!fs.existsSync(exe(tool)) || !fs.existsSync(exe('ffmpeg'))) return fail(j, `${tool} is not available in this build.`);
+    fs.mkdirSync(j.dir, { recursive: true });
+    j.state = 'running';
+    j.stage = 'fetching';
+    const args = buildArgs(tool, j.url, j.format, j.dir, exe('ffmpeg'));
+    if (j.cache) args.splice(args.indexOf('--'), 0, '--max-filesize', String(limitBytes));
+    const env = { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', NO_COLOR: '1' };
+    const code = await new Promise((resolve) => {
+      let child;
+      try {
+        child = run(exe(tool), args, { cwd: j.dir, env, windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+      } catch (e) {
+        j.errText = e.message;
+        return resolve(-1);
+      }
+      j.child = child;
+      let tail = '';
+      const onData = (buf) => {
+        for (const raw of buf.toString('utf8').split(/\r?\n|\r/)) {
+          const line = raw.trim();
+          if (!line) continue;
+          tail = `${tail}\n${line}`.slice(-4000);
+          const pct = /\[download\]\s+([\d.]+)%/.exec(line);
+          if (pct) j.percent = Math.min(100, Number(pct[1]));
+          if (/^\[(ExtractAudio|Merger|Metadata|EmbedThumbnail)\]/.test(line) || /^Converting|^Downloaded /.test(line)) j.stage = 'converting';
+          j.message = line.slice(0, 300);
+        }
+      };
+      child.stdout.on('data', onData);
+      child.stderr.on('data', onData);
+      child.on('error', (e) => {
+        j.errText = e.message;
+        resolve(-1);
+      });
+      child.on('close', (c) => {
+        j.errText = j.errText || tail;
+        resolve(c);
+      });
+    });
+    j.child = null;
+    if (j.cancelled) return fail(j, 'cancelled');
+    if (code !== 0) return fail(j, lastMeaningfulLine(j.errText) || `${tool} exited with code ${code}.`);
+
+    j.stage = 'finalizing';
+    const found = [];
+    const walk = (d, depth) => {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        const p = path.join(d, e.name);
+        if (e.isDirectory() && depth < 3) walk(p, depth + 1);
+        else if (e.isFile() && AUDIO_EXT.has(path.extname(e.name).slice(1).toLowerCase())) found.push(p);
+      }
+    };
+    walk(j.dir, 0);
+    if (found.length === 0) return fail(j, `${tool} finished without producing an audio file.`);
+    if (j.cache) {
+      if (found.length !== 1) return fail(j, 'A song must produce exactly one audio file to enter the queue cache.');
+      const src = found[0];
+      const bytes = fs.statSync(src).size;
+      if (bytes > limitBytes) return fail(j, 'This song is larger than the queue cache limit. Increase it in Settings.');
+      // Pass the song's own URL: its rank in the listening order decides what it may displace, and
+      // a re-download of a song already cached must never evict the copy it is replacing.
+      try { prune(bytes, j.background, j.url); } catch (e) { return fail(j, e.message); }
+      const name = `${j.id}${path.extname(src).toLowerCase()}`;
+      const dest = path.join(cacheDir, name);
+      try { fs.renameSync(src, dest); } catch { fs.copyFileSync(src, dest); }
+      cached.set(j.url, { name, display: safeName(path.basename(src)), at: Date.now() });
+      persistCache();
+      j.files.push({ name: path.basename(src), path: dest, bytes });
+      j.saved_to = 'Queue cache (temporary)';
+      if (j.keep) {
+        const permanent = uniqueIn(saveDir, safeName(path.basename(src)));
+        fs.mkdirSync(saveDir, { recursive: true });
+        fs.copyFileSync(dest, permanent);
+        library.set(j.url, permanent);
+        j.files = [{ name: path.basename(permanent), path: permanent, bytes }];
+        j.saved_to = saveDir;
+      }
+    } else {
+      fs.mkdirSync(saveDir, { recursive: true });
+      for (const src of found.sort()) {
+        const dest = uniqueIn(saveDir, safeName(path.basename(src)));
+        try { fs.renameSync(src, dest); } catch { fs.copyFileSync(src, dest); }
+        j.files.push({ name: path.basename(dest), path: dest, bytes: fs.statSync(dest).size });
+      }
+      j.saved_to = saveDir;
+      // Register whichever tool produced it. Gating this on yt-dlp meant a finished spotdl song was
+      // never recorded, so the app could not tell it already held the file and a second Download
+      // wrote "Artist - Title (2).opus" instead of reusing it.
+      if (j.files.length === 1) library.set(j.url, j.files[0].path);
+    }
+    j.state = 'done';
+    j.stage = 'done';
+    j.percent = 100;
+  }
+
+  function start({ url, tool, format, label, cache = false, background = false }) {
+    if (tool !== 'yt-dlp' && tool !== 'spotdl') throw new Error('Unknown tool.');
+    if (cache && (tool !== 'yt-dlp' || format !== 'original')) throw new Error('The playback cache accepts only original full songs.');
+    if (!FORMATS.includes(format)) throw new Error('Unsupported format.');
+    if (!urlAllowedFor(tool, url)) throw new Error(tool === 'spotdl' ? 'spotDL takes a Spotify track link (open.spotify.com/track/…).' : 'yt-dlp downloads from YouTube, YouTube Music and SoundCloud links.');
+    const existing = [...jobs.values()].find((x) => x.url === url && (x.state === 'queued' || x.state === 'running'));
+    if (existing) {
+      if (!background) existing.background = false;
+      queueMicrotask(pump);
+      return view(existing);
+    }
+    const running = [...jobs.values()].filter((x) => x.state === 'queued' || x.state === 'running').length;
+    if (running >= 20) throw new Error('Too many downloads are waiting. Let some finish first.');
+    const id = crypto.randomUUID();
+    const j = { id, url, tool, format, cache: Boolean(cache), background: Boolean(background), label: String(label || '').slice(0, 200), state: 'queued', stage: 'queued', percent: null, message: null, error: null, files: [], saved_to: null, cancelled: false, child: null, errText: '', dir: path.join(cfg.tempRoot, id) };
+    jobs.set(id, j);
+    queueMicrotask(pump);
+    return view(j);
+  }
+
+  function killTree(child) {
+    if (!child || !child.pid) return;
+    // yt-dlp and spotDL are PyInstaller one-file programs: the visible process has a child.
+    spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true });
+  }
+
+  function cancel(id) {
+    const j = jobs.get(id);
+    if (!j) return false;
+    if (j.state === 'queued' || j.state === 'running') {
+      j.cancelled = true;
+      killTree(j.child);
+      if (j.state === 'queued') {
+        j.state = 'cancelled';
+        j.stage = 'done';
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Spotify search by spotDL's own `save` command. spotDL writes the songs it finds to a JSON file
+   * (no download happens); the file is read and deleted here. Bounded: 45 s and a 2 MB answer.
+   */
+  function searchSpotify(query, limit) {
+    const q = String(query || '').trim().slice(0, 200);
+    if (!q) return { songs: [] };
+    if (!fs.existsSync(exe('spotdl'))) throw new Error("spotDL is not in the app's tools folder.");
+    fs.mkdirSync(cfg.tempRoot, { recursive: true });
+    const file = path.join(cfg.tempRoot, `search-${crypto.randomUUID()}.spotdl`);
+    const env = { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', NO_COLOR: '1' };
+    try {
+      const r = spawnSync(exe('spotdl'), ['save', q, '--save-file', file, '--log-level', 'ERROR'], { env, windowsHide: true, shell: false, encoding: 'utf8', timeout: 45_000, maxBuffer: 2_000_000 });
+      if (r.error) throw new Error(`spotDL could not run: ${r.error.message}`);
+      if (!fs.existsSync(file)) throw new Error(lastMeaningfulLine(`${r.stdout || ''}
+${r.stderr || ''}`) || 'spotDL found nothing for that search.');
+      const size = fs.statSync(file).size;
+      if (size > 2_000_000) throw new Error('spotDL answered with more than 2 MB.');
+      const songs = JSON.parse(fs.readFileSync(file, 'utf8'));
+      return { songs: Array.isArray(songs) ? songs.slice(0, Math.max(1, Math.min(25, Number(limit) || 12))) : [] };
+    } finally {
+      fs.rm(file, { force: true }, () => undefined);
+    }
+  }
+
+  function handle(req) {
+    switch (req.op) {
+      case 'health':
+        return health();
+      case 'spotify-search':
+        return searchSpotify(req.query, req.limit);
+      case 'start':
+        return { job: start(req) };
+      case 'jobs':
+        return { jobs: [...jobs.values()].map(view) };
+      case 'cache-config': {
+        const gb = Number(req.limitGb);
+        if (!Number.isFinite(gb) || gb < 0.25 || gb > 20) throw new Error('Queue cache size must be between 0.25 and 20 GB.');
+        const urls = (name, max, fallback) => {
+          const list = req[name] === undefined ? fallback : req[name];
+          if (!Array.isArray(list) || list.length > max || list.some(url => typeof url !== 'string' || !urlAllowedFor('yt-dlp', url))) throw new Error(`${name} must contain at most ${max} valid URLs.`);
+          return list;
+        };
+        // Omitting parallel keeps whatever is in force; a bad value is refused, never quietly clamped.
+        let nextParallel = backgroundParallel;
+        if (req.parallel !== undefined) {
+          if (typeof req.parallel !== 'number' || !Number.isInteger(req.parallel) || req.parallel < PARALLEL_MIN || req.parallel > PARALLEL_MAX) {
+            throw new Error(`parallel must be a whole number of background downloads between ${PARALLEL_MIN} and ${PARALLEL_MAX}.`);
+          }
+          nextParallel = req.parallel;
+        }
+        const nextProtected = new Set(urls('protected', 3, []));
+        // Order is meaning here, not decoration: it is the playback order the retention plan rolls along.
+        const nextWanted = new Map();
+        urls('wanted', 10000, []).forEach((url, i) => { if (!nextWanted.has(url)) nextWanted.set(url, i); });
+        const previousLimit = limitBytes;
+        const previousProtected = protectedUrls;
+        const previousWanted = wantedRank;
+        limitBytes = Math.floor(gb * 1024 ** 3);
+        protectedUrls = nextProtected;
+        // The new list is in force for the plan: songs the listener just left behind are the first
+        // to go when a lowered limit has to be met, ahead of any song still on the new list.
+        wantedRank = nextWanted;
+        try { prune(); } catch (e) { limitBytes = previousLimit; protectedUrls = previousProtected; wantedRank = previousWanted; throw e; }
+        backgroundParallel = nextParallel;
+        // Only obsolete BACKGROUND list work is cancelled. A song the listener asked for by hand -
+        // a foreground job, or one a Keep is riding on - is never thrown away by a change of list.
+        for (const j of jobs.values()) {
+          if (!j.cache || !j.background || j.keep) continue;
+          if (!wantedRank.has(j.url) && !protectedUrls.has(j.url) && (j.state === 'queued' || j.state === 'running')) cancel(j.id);
+        }
+        // A raised limit must start queued songs now, not when a running download happens to end.
+        pump();
+        return { bytes: cacheBytes(), limitBytes, parallel: backgroundParallel };
+      }
+      case 'cache-clear': {
+        /*
+         * RESET-APP-001: put the audio cache back to empty, as part of "reset everything back to
+         * default". Only the app's own evictable cache is touched — a copy the owner chose to Keep
+         * lives in their Music folder and is their property, so it is never removed here. Running
+         * downloads are cancelled first, or a job in flight would write a new file straight after.
+         */
+        for (const job of jobs.values()) {
+          if (job.state === 'running' || job.state === 'queued') cancel(job.id);
+        }
+        let removed = 0;
+        for (const [url, entry] of [...cached]) {
+          try {
+            fs.rmSync(path.join(cacheDir, entry.name), { force: true });
+            removed++;
+          } catch { /* a file already gone is still a file gone */ }
+          cached.delete(url);
+        }
+        // Sweep anything the index had lost track of, so "cleared" means the directory is empty.
+        for (const name of fs.readdirSync(cacheDir)) {
+          if (name === 'index.json') continue;
+          try { fs.rmSync(path.join(cacheDir, name), { force: true, recursive: true }); removed++; } catch { /* ignore */ }
+        }
+        persistCache();
+        return { removed, bytes: cacheBytes() };
+      }
+      case 'keep':
+        return keep(String(req.url || ''));
+      case 'choose-folder':
+        if (!cfg.chooseFolder) throw new Error('Folder picker is unavailable.');
+        return Promise.resolve(cfg.chooseFolder(saveDir)).then((dir) => {
+          if (!dir) return { saves_to: saveDir };
+          fs.mkdirSync(dir, { recursive: true });
+          saveDir = dir;
+          return { saves_to: saveDir };
+        });
+      case 'cancel':
+        return { ok: cancel(String(req.id)) };
+      case 'forget': {
+        cancel(String(req.id));
+        return { ok: jobs.delete(String(req.id)) };
+      }
+      case 'local': {
+        // What the shell holds for a link: the finished file, or whether a job for it is running.
+        const url = String(req.url || '');
+        // Either downloader's link is a fair question: asking "do you hold this?" about a Spotify
+        // track used to throw, so the app could never see a finished spotdl download.
+        if (!urlAllowedFor('yt-dlp', url) && !urlAllowedFor('spotdl', url)) throw new Error('Not a link this app downloads from.');
+        // `kept` and `cached` are reported separately: the card badge must distinguish a permanent
+        // Music-folder copy from an evictable queue-cache entry. `file` is either, for playback.
+        const keptPath = library.get(url);
+        const cachedPath = cachedFile(url);
+        const p = keptPath || cachedPath;
+        const running = [...jobs.values()].some((j) => j.url === url && (j.state === 'queued' || j.state === 'running'));
+        const failed = [...jobs.values()].reverse().find((j) => j.url === url && j.state === 'failed');
+        return { file: p ? { name: path.basename(p), bytes: fs.statSync(p).size } : null, kept: Boolean(keptPath), cached: Boolean(cachedPath), running, error: !p && !running ? failed?.error || null : null };
+      }
+      case 'open-list':
+        return openList(req);
+      case 'save-list':
+        return saveList(req);
+      case 'open-saved': {
+        const folder = savedFolder(req);
+        const ok = fs.existsSync(folder);
+        if (ok && cfg.openFolder) cfg.openFolder(folder);
+        return { ok, folder };
+      }
+      case 'reveal': {
+        const j = jobs.get(String(req.id));
+        const f = j && j.files[0];
+        if (!f) return { ok: false };
+        if (cfg.reveal) cfg.reveal(f.path);
+        return { ok: true };
+      }
+      default:
+        throw new Error('Unknown request.');
+    }
+  }
+
+  /**
+   * LIST-FOLDER-001. Owner: "add a button where the user can open the local folder with the current
+   * song list / queue". The list's downloaded songs go in <music folder>\Song lists\<list name>,
+   * numbered in play order, with an .m3u8 so any player plays them in that order, and the folder is
+   * opened. Each file is a hard link to the download (no second copy on the same drive; a copy when
+   * the drives differ). The folder's .airwave-list.json names what the app put there, so opening the
+   * list again replaces only those and leaves anything the owner added.
+   */
+  function openList(req) {
+    const name = safeName(String(req.name || 'Now playing queue')).slice(0, 80).replace(/^\.+/, '') || 'Now playing queue';
+    const songs = Array.isArray(req.songs) ? req.songs.slice(0, 5000) : [];
+    const root = path.join(saveDir, 'Song lists');
+    const folder = path.join(root, name);
+    if (path.dirname(folder) !== root) throw new Error('Bad list name.');
+    fs.mkdirSync(folder, { recursive: true });
+    const manifest = path.join(folder, '.airwave-list.json');
+    let before = [];
+    try { before = JSON.parse(fs.readFileSync(manifest, 'utf8')).files || []; } catch { /* first time */ }
+    for (const f of before) {
+      if (typeof f === 'string' && f === path.basename(f) && !f.startsWith('.')) {
+        try { fs.rmSync(path.join(folder, f), { force: true }); } catch { /* in use: left as it is */ }
+      }
+    }
+    const files = [];
+    const lines = ['#EXTM3U'];
+    for (const song of songs) {
+      const link = String((song && song.url) || '');
+      if (!urlAllowedFor('yt-dlp', link) && !urlAllowedFor('spotdl', link)) continue;
+      const src = library.get(link) || cachedFile(link);
+      if (!src) continue;
+      const title = String(song.title || 'Song').slice(0, 120);
+      const artist = String(song.artist || '').slice(0, 80);
+      const label = artist ? `${title} - ${artist}` : title;
+      const file = safeName(`${String(files.length + 1).padStart(2, '0')} ${label}`).slice(0, 150) + path.extname(src);
+      const dest = path.join(folder, file);
+      try {
+        try { fs.linkSync(src, dest); } catch (e) { if (e.code === 'EEXIST') { fs.rmSync(dest, { force: true }); fs.linkSync(src, dest); } else fs.copyFileSync(src, dest); }
+      } catch { continue; }
+      files.push(file);
+      lines.push(`#EXTINF:-1,${artist ? `${artist} - ` : ''}${title}`.replace(/[\r\n]/g, ' '), file);
+    }
+    const playlist = `${name}.m3u8`;
+    fs.writeFileSync(path.join(folder, playlist), lines.join('\r\n') + '\r\n', 'utf8');
+    fs.writeFileSync(manifest, JSON.stringify({ files: [...files, playlist] }), 'utf8');
+    if (cfg.openFolder) cfg.openFolder(folder);
+    return { ok: true, held: files.length, total: songs.length, folder };
+  }
+
+  /**
+   * LIST-SAVE-FOLDER-001: where one saved list or album lives on disk — <music folder>\Albums\<name> or
+   * <music folder>\Lists\<name>. The name cannot leave that folder.
+   */
+  function savedFolder(req) {
+    const kind = String(req.kind || '');
+    if (kind !== 'album' && kind !== 'list') throw new Error('Save an album or a list.');
+    const root = path.join(saveDir, kind === 'album' ? 'Albums' : 'Lists');
+    const name = safeName(String(req.name || '')).slice(0, 120).replace(/^\.+/, '') || (kind === 'album' ? 'Album' : 'List');
+    const folder = path.join(root, name);
+    if (path.dirname(folder) !== root) throw new Error('Bad list name.');
+    return folder;
+  }
+
+  /**
+   * LIST-SAVE-FOLDER-001. Owner: "quick download entire saved playlist / album and download into
+   * seperated folder for just those tracks". The page asks for every song and calls this again as more
+   * finish: each held song is linked (or copied across drives) into the list's own folder, numbered by
+   * its place in the list, and the .m3u8 is rewritten in that order. A song already in the folder is
+   * never removed or replaced. The folder copy becomes the kept copy when the song had none, so it plays
+   * offline and the cache limit cannot take it away.
+   */
+  function saveList(req) {
+    const folder = savedFolder(req);
+    fs.mkdirSync(folder, { recursive: true });
+    const manifest = path.join(folder, '.airwave-list.json');
+    let held = {};
+    try {
+      const m = JSON.parse(fs.readFileSync(manifest, 'utf8'));
+      if (m && typeof m.songs === 'object' && !Array.isArray(m.songs)) held = m.songs;
+    } catch { /* first time */ }
+    // What is still on disk: a file the owner deleted is simply fetched into place again.
+    for (const [u, e] of Object.entries(held)) {
+      if (!e || typeof e.file !== 'string' || e.file !== path.basename(e.file) || !fs.existsSync(path.join(folder, e.file))) delete held[u];
+    }
+    const songs = Array.isArray(req.songs) ? req.songs.slice(0, 5000) : [];
+    for (const song of songs) {
+      const link = String((song && song.url) || '');
+      if (held[link] || (!urlAllowedFor('yt-dlp', link) && !urlAllowedFor('spotdl', link))) continue;
+      const src = library.get(link) || cachedFile(link);
+      if (!src) continue;
+      const n = Math.max(1, Math.min(9999, Math.floor(Number(song.n)) || 1));
+      const title = String(song.title || 'Song').slice(0, 120);
+      const artist = String(song.artist || '').slice(0, 80);
+      const label = artist ? `${title} - ${artist}` : title;
+      const file = safeName(`${String(n).padStart(2, '0')} ${label}`).slice(0, 150) + path.extname(src);
+      const dest = path.join(folder, file);
+      try {
+        if (!fs.existsSync(dest)) {
+          try { fs.linkSync(src, dest); } catch { fs.copyFileSync(src, dest); }
+        }
+      } catch { continue; }
+      held[link] = { file, n, title, artist };
+      if (!library.get(link)) library.set(link, dest);
+    }
+    const order = Object.values(held).sort((a, b) => a.n - b.n || a.file.localeCompare(b.file));
+    const lines = ['#EXTM3U'];
+    for (const e of order) lines.push(`#EXTINF:-1,${e.artist ? `${e.artist} - ` : ''}${e.title}`.replace(/[\r\n]/g, ' '), e.file);
+    fs.writeFileSync(path.join(folder, `${path.basename(folder)}.m3u8`), lines.join('\r\n') + '\r\n', 'utf8');
+    fs.writeFileSync(manifest, JSON.stringify({ songs: held }), 'utf8');
+    const total = Number.isFinite(Number(req.total)) ? Math.max(0, Math.floor(Number(req.total))) : songs.length;
+    return { ok: true, held: order.length, total, folder };
+  }
+
+  function shutdown() {
+    for (const j of jobs.values()) {
+      j.cancelled = true;
+      killTree(j.child);
+    }
+  }
+
+  /** The file held for a link, for the shell to serve at the app origin; null when there is none. */
+  const localFile = (url) => (urlAllowedFor('yt-dlp', url) ? library.get(url) || cachedFile(url) : null);
+
+  return { handle, health, shutdown, localFile };
+}
+
+module.exports = { createDownloads, buildArgs, urlAllowedFor, safeName, YTDLP_HOSTS, YTDLP_SUFFIXES, SPOTDL_HOSTS, FORMATS };

@@ -1,0 +1,175 @@
+/**
+ * Classifies a song into the Taste Picker's families and subgenres, and gives it the picker's colour.
+ *
+ * The picker places a song in a family by its hue (the spectrum band) and in a subgenre by its tempo
+ * within that family. Here a song's tags pick the family and subgenre; when there is no tag, the
+ * tempo alone picks the subgenre inside a family that the tags name. Colour follows the picker's
+ * band, from the one palette every surface uses (genre-palette.ts, TAGS-COLOR-001): a family has its
+ * colour, and each subgenre its own, measurably distinct from the family and its siblings.
+ */
+import { CATALOG } from './taste-catalog';
+import { FAMILIES, FAMILY_TAGS, SUBS, type SubDef } from './genre-table';
+import { familyColor, subColorOf } from './genre-palette';
+import { fold } from './identity';
+import { ancestors, type Tag } from './genres';
+
+export interface Classification {
+  family: string; // family name, e.g. 'Electronic'
+  familySlug: string;
+  subgenre: string | null; // picker subgenre name, e.g. 'Tech house'
+  key: string | null; // canonical subgenre key, e.g. 'tech-house'
+  tempoFit: number | null; // 0..1: how well the song's tempo sits in the subgenre's range
+  hue: number; // 0..360, the picker's band colour
+  energy: number | null;
+  brightness: number | null;
+  color: string; // css colour (sRGB hex), from genre-palette.ts
+}
+
+const BAND = 45;
+const CATALOG_BY_NAME = new Map(CATALOG.flatMap((f) => f.subs.map((s) => [s.name, s] as const)));
+const SUB_BY_KEY = new Map(SUBS.map((s) => [s.key, s] as const));
+const SUBS_BY_FAMILY = new Map<string, SubDef[]>();
+for (const s of SUBS) {
+  const list = SUBS_BY_FAMILY.get(s.family) ?? [];
+  list.push(s);
+  SUBS_BY_FAMILY.set(s.family, list);
+}
+const FAMILY_INDEX = new Map(FAMILIES.map((f, i) => [f.slug, i] as const));
+const ALIAS = new Map<string, SubDef>();
+for (const s of SUBS) {
+  for (const a of [s.key, s.name, ...s.aliases]) {
+    const k = fold(a);
+    if (k && !ALIAS.has(k)) ALIAS.set(k, s);
+  }
+}
+
+/** Hue of a family's band, the picker's `i*45 + 22.5`. */
+export function familyHue(slug: string): number {
+  const i = FAMILY_INDEX.get(slug) ?? 0;
+  return i * BAND + BAND / 2;
+}
+
+/** Tempo fit inside a subgenre: 1 inside its range (half and double time count), falling to 0 at 25% off. */
+export function tempoFitIn(bpm: number, lo: number, hi: number, halftime: boolean): number {
+  const near = (x: number) => (x >= lo && x <= hi ? 1 : Math.max(0, 1 - Math.min(Math.abs(x - lo), Math.abs(x - hi)) / (0.25 * ((lo + hi) / 2))));
+  const direct = near(bpm);
+  // Half and double time are the same groove counted two ways: a 130 BPM track is felt as 65.
+  // Counted at the other rate it can still belong to the range, a little less certainly.
+  const other = near(bpm * 2) * 0.9;
+  const half = near(bpm / 2) * 0.9;
+  return Math.max(direct, other, half);
+}
+
+/** Subgenre whose name or alias appears in a tag or genre label. */
+function subFromTags(tags: Tag[]): SubDef | null {
+  // Strongest tags first; a subgenre match beats a family match.
+  const ordered = [...tags].sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
+  for (const t of ordered) {
+    // GENRE-CLASS-001: the word the service sent first. A tag stored under a broader canonical name
+    // ('bedroom pop' kept as indie-pop, 'vaporwave' as synthwave) still names the subgenre it meant.
+    const hit = ALIAS.get(fold(t.label ?? '')) ?? ALIAS.get(fold(t.name));
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/**
+ * The picker family a canonical genre belongs to: its own family word, or the nearest parent that has
+ * one ('deep-house' -> house -> Electronic, 'dancehall' -> reggae -> R&B/Afro/Latin). GENRE-CLASS-001.
+ */
+export function familyOfGenre(name: string): string | null {
+  for (const g of [name, ...ancestors(name)]) {
+    const f = FAMILY_TAGS[g];
+    if (f) return f;
+  }
+  return null;
+}
+
+function familyFromTags(tags: Tag[]): string | null {
+  const ordered = [...tags].sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
+  for (const t of ordered) {
+    const f = familyOfGenre(t.name);
+    if (f) return f;
+  }
+  return null;
+}
+
+/**
+ * Classify a song. Subgenre from its tags first; if the tags only name a family, the tempo picks the
+ * subgenre inside that family (best fit). With no genre tag, the tempo alone places it.
+ */
+export function classify(tags: Tag[] | null | undefined, bpm: number | null | undefined): Classification | null {
+  const tg = (tags ?? []).filter((t) => t && typeof t.name === 'string');
+  const b = typeof bpm === 'number' && bpm > 30 && bpm < 300 ? bpm : null;
+  let sub = subFromTags(tg);
+  const familySlug = sub?.family ?? familyFromTags(tg);
+  // A family word alone ('alternative', 'electronic') does not name a subgenre, however the tempo
+  // falls: the family stays and the subgenre is left null.
+  //
+  // TASTE-ACCURACY-001: tempo alone names NOTHING. It used to pick the best tempo match across the
+  // whole catalog, which put every untagged song between 87 and 125 BPM into Rock / 'Nu-metal
+  // revival' — so a hip-hop listener's own history came back labelled as rock, and the taste map
+  // read their taste off it. The rule the family branch already followed ("art rock at 164 BPM is
+  // not metalcore just because its tempo falls in that range") applies with more force when there
+  // is no genre evidence at all: a song with no genre tag is simply not placed, and the Profile
+  // lists it as "not on the map".
+  if (!familySlug) return null;
+  const family = FAMILIES.find((f) => f.slug === familySlug)!;
+  const cat = sub ? CATALOG_BY_NAME.get(sub.name) : undefined;
+  const hue = familyHue(familySlug);
+  const fit = sub && cat && b !== null ? tempoFitIn(b, cat.lo, cat.hi, cat.halftime) : null;
+  return {
+    family: family.name,
+    familySlug,
+    subgenre: sub?.name ?? null,
+    key: sub?.key ?? null,
+    tempoFit: fit === null ? null : Math.round(fit * 100) / 100,
+    hue,
+    energy: cat?.energy ?? null,
+    brightness: cat?.brightness ?? null,
+    color: (sub ? subColorOf(sub.key) : null) ?? familyColor(familySlug),
+  };
+}
+
+/**
+ * Every family and subgenre the tags name, strongest tag first (TAGS-MULTI-001).
+ *
+ * A song is not one genre: "CUFF IT" is R&B and pop, a Ken Carson song is rap and rage. The first
+ * entry is what classify() returns, so a song's place on the taste map does not move; the rest are
+ * what the card shows beside it. Only genres the tags actually name appear — nothing is guessed
+ * from tempo, and a family already named by one of its own subgenres is not repeated.
+ */
+export function classifyAll(tags: Tag[] | null | undefined, bpm: number | null | undefined): Classification[] {
+  const tg = (tags ?? []).filter((t) => t && typeof t.name === 'string').sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
+  const out: Classification[] = [];
+  const seen = new Set<string>();
+  const familiesWithSub = new Set<string>();
+  for (const t of tg) {
+    const one = classify([t], bpm);
+    if (!one) continue;
+    const key = `${one.familySlug}/${one.key ?? ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (one.subgenre) familiesWithSub.add(one.familySlug);
+    out.push(one);
+  }
+  // A bare family bubble is noise next to its own subgenre ('Hip-hop' beside 'Rage'), so it goes.
+  return out.filter((c) => c.subgenre !== null || !familiesWithSub.has(c.familySlug));
+}
+
+function bestByTempo(list: SubDef[], bpm: number): SubDef | null {
+  let best: SubDef | null = null;
+  let bestFit = -1;
+  for (const s of list) {
+    const c = CATALOG_BY_NAME.get(s.name);
+    if (!c) continue;
+    const f = tempoFitIn(bpm, c.lo, c.hi, c.halftime);
+    if (f > bestFit) {
+      bestFit = f;
+      best = s;
+    }
+  }
+  return best;
+}
+
+export { SUB_BY_KEY };

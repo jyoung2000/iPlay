@@ -1,0 +1,15 @@
+node_modules/
+dist/
+build/
+.gradle/
+release/
+*.apk
+*.exe
+*.blockmap
+local.properties
+keystore.properties
+codesign.properties
+*.jks
+*.keystore
+*.pfx
+__pycache__/

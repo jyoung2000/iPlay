@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+  <uses-permission android:name="android.permission.INTERNET" />
+  <!-- Song identification from the search bar's Mic: asked for when Mic is tapped, never at start-up. -->
+  <uses-permission android:name="android.permission.RECORD_AUDIO" />
+  <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+  <uses-permission android:name="android.permission.WAKE_LOCK" />
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <uses-feature android:name="android.hardware.microphone" android:required="false" />
+
+  <application
+    android:allowBackup="false"
+    android:icon="@mipmap/ic_launcher"
+    android:roundIcon="@mipmap/ic_launcher_round"
+    android:label="@string/app_name"
+    android:theme="@style/Theme.Discovery"
+    android:networkSecurityConfig="@xml/network_security_config"
+    android:usesCleartextTraffic="false">
+
+    <activity
+      android:name=".MainActivity"
+      android:exported="true"
+      android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden"
+      android:windowSoftInputMode="adjustResize">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+      <!-- VOICE-SEARCH-001: "Play <song> on jPlay" from Google Assistant; Android Auto's
+           voice actions require it too. -->
+      <intent-filter>
+        <action android:name="android.media.action.MEDIA_PLAY_FROM_SEARCH" />
+        <category android:name="android.intent.category.DEFAULT" />
+      </intent-filter>
+    </activity>
+    <!-- Native music player: a Media3 MediaLibraryService whose Player (WebPlayer) proxies the
+         WebView's Web Audio engine. The OS lock screen, quick-panel media card, Bluetooth/headset
+         buttons and Android Auto all control the SAME playback, so the EQ, crossfade and mixer stay
+         intact. Android Auto does not render audio itself; it only browses this service's tree and
+         drives its session, which is why the WebView can remain the audio renderer. -->
+    <service
+      android:name=".PlaybackService"
+      android:exported="true"
+      android:foregroundServiceType="mediaPlayback">
+      <intent-filter>
+        <action android:name="androidx.media3.session.MediaLibraryService" />
+        <action android:name="androidx.media3.session.MediaSessionService" />
+        <action android:name="android.media.browse.MediaBrowserService" />
+      </intent-filter>
+    </service>
+    <!-- Cold-start media buttons (Bluetooth/headset/steering wheel) route here when the service is
+         not already running; Media3 handles them once it is. -->
+    <receiver
+      android:name="androidx.media3.session.MediaButtonReceiver"
+      android:exported="true">
+      <intent-filter>
+        <action android:name="android.intent.action.MEDIA_BUTTON" />
+      </intent-filter>
+    </receiver>
+    <!-- LIST-FOLDER-001: the "jPlay" place in the Files app, holding the song list the
+         owner opened from the app (read-only; only the system file manager may bind it). -->
+    <provider
+      android:name=".ListFolderProvider"
+      android:authorities="com.nowplaying.discovery.listfolder"
+      android:exported="true"
+      android:grantUriPermissions="true"
+      android:permission="android.permission.MANAGE_DOCUMENTS">
+      <intent-filter>
+        <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+      </intent-filter>
+    </provider>
+    <!-- Points Android Auto at res/xml/automotive_app_desc.xml so it treats this as a media app. -->
+    <meta-data
+      android:name="com.google.android.gms.car.application"
+      android:resource="@xml/automotive_app_desc" />
+  </application>
+</manifest>

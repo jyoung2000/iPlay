@@ -1,0 +1,1519 @@
+/* ==========================================================================
+   @now-playing/aqua-ui — Aqua 2009 reconstruction stylesheet
+   AQUA_PROFILE=snow-leopard-itunes-9 (default)
+   Source of truth for every value: ./tokens.json (spec §7.2). This file
+   mirrors those values as custom properties (spec §7.3/§7.4) and adds the
+   component recipes (spec §12, extended). Class prefix: aqua-
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   0. Type: Lucida Grande first, then a metric-tuned local fallback face so
+   the compact 13/12/11/10 px roles keep their optical size on hosts without
+   Lucida. No web fonts are fetched.
+   -------------------------------------------------------------------------- */
+@font-face {
+  font-family: "Aqua Fallback";
+  src: local("Lucida Sans Unicode"), local("LucidaSansUnicode"), local("Segoe UI"), local("SegoeUI"), local("DejaVu Sans"), local("Verdana");
+  size-adjust: 96%;
+  ascent-override: 96%;
+  descent-override: 24%;
+  line-gap-override: 0%;
+}
+
+/* --------------------------------------------------------------------------
+   1. Tokens (spec §7.3) + semantic additions mirrored from tokens.json
+   -------------------------------------------------------------------------- */
+:root,
+[data-aqua-profile="snow-leopard-itunes-9"] {
+  color-scheme: light;
+
+  /*
+   * Shared controls: button, text field, checkbox.
+   *
+   * These were written as bare hex literals, which made them light-only: the player offers
+   * a dark scheme, so on a dark page every button and field kept a white face and a grey
+   * rim. The values here are exactly what shipped. `now-playing.css` overrides them in its
+   * dark block, which is the only surface that goes dark - the hub admin GUI and the
+   * companion declare `color-scheme: light` and must keep these.
+   */
+  --aqua-ctl-ink: #151515;
+  --aqua-ctl-face-1: #fdfdfd;
+  --aqua-ctl-face-2: #f4f4f4;
+  --aqua-ctl-face-3: #e6e6e6;
+  --aqua-ctl-face-4: #dcdcdc;
+  --aqua-ctl-face-hover-1: #fff;
+  --aqua-ctl-face-hover-2: #f8f8f8;
+  --aqua-ctl-face-hover-3: #ececec;
+  --aqua-ctl-face-hover-4: #e3e3e3;
+  --aqua-ctl-face-active-1: #c9c9c9;
+  --aqua-ctl-face-active-2: #d6d6d6;
+  --aqua-ctl-face-active-3: #dedede;
+  --aqua-ctl-face-disabled-1: #fbfbfb;
+  --aqua-ctl-face-disabled-2: #f1f1f1;
+  --aqua-ctl-border: #a3a3a3;
+  --aqua-ctl-border-bottom: #8d8d8d;
+  --aqua-ctl-border-disabled: #c9c9c9;
+  --aqua-ctl-focus-ring: #0d61a7;
+  --aqua-ctl-default-ink: #06203a;
+  --aqua-ctl-default-1: #cfeaff;
+  --aqua-ctl-default-2: #a3d4fb;
+  --aqua-ctl-default-3: #74b9f5;
+  --aqua-ctl-default-4: #5aa8ef;
+  --aqua-ctl-default-border: #4684c8;
+  --aqua-ctl-default-border-bottom: #356db0;
+  --aqua-ctl-box-ink: #1a2733;
+  --aqua-ctl-box-1: #fdfdfd;
+  --aqua-ctl-box-2: #f0f0f0;
+  --aqua-ctl-box-3: #e4e4e4;
+  --aqua-ctl-box-border: #a0a0a0;
+  --aqua-ctl-box-on-1: #7db4e6;
+  --aqua-ctl-box-on-2: #4f92d6;
+  --aqua-ctl-box-on-3: #3f81c6;
+  --aqua-ctl-box-on-border: #3d76ad;
+  --aqua-ctl-field-bg: #fff;
+  --aqua-ctl-field-border: #9a9a9a;
+  --aqua-ctl-field-border-top: #7d7d7d;
+  --aqua-ctl-field-focus-border: #1768a7;
+  --aqua-ctl-field-invalid-border: #b8433d;
+  --aqua-ctl-placeholder: #8b9095;
+
+  --aqua-font: "Lucida Grande", "Aqua Fallback", "Lucida Sans Unicode", "Helvetica Neue", Arial, sans-serif;
+  --aqua-font-system: 13px;
+  --aqua-font-view: 12px;
+  --aqua-font-small: 11px;
+  --aqua-font-label: 10px;
+  --aqua-font-mini: 9px;
+  --aqua-weight-regular: 400;
+  --aqua-weight-emphasized: 700;
+  --aqua-line-compact: 1.2;
+  --aqua-line-body: 1.35;
+
+  --aqua-text: #161616;
+  --aqua-text-secondary: #565b60;
+  --aqua-text-disabled: #96999c;
+
+  --aqua-desktop: #6d737a;
+  --aqua-window-outline: #747474;
+  --aqua-window-body: #ececec;
+  --aqua-content: #fff;
+  --aqua-content-muted: #f7f7f7;
+  --aqua-stripe: #f1f6fb;
+  --aqua-row-divider: #d8dee5;
+
+  --aqua-chrome-top: #f6f6f6;
+  --aqua-chrome-upper: #e5e5e5;
+  --aqua-chrome-lower: #c4c4c4;
+  --aqua-chrome-bottom: #afafaf;
+  --aqua-chrome-separator: #858585;
+  --aqua-chrome-highlight: #fff;
+
+  --aqua-sidebar-top: #dce8f4;
+  --aqua-sidebar-bottom: #becee0;
+  --aqua-sidebar-divider: #93a3b2;
+  --aqua-sidebar-group-text: #536473;
+
+  --aqua-blue-specular: #eafbff;
+  --aqua-blue-top: #a9e5ff;
+  --aqua-blue-mid: #38b6f7;
+  --aqua-blue-lower: #0d83d6;
+  --aqua-blue-bottom: #075fa6;
+  --aqua-blue-rim: #07558f;
+
+  --aqua-selection-top: #69b5f3;
+  --aqua-selection-mid: #378dda;
+  --aqua-selection-bottom: #1764b2;
+  --aqua-selection-border: #0f4e8b;
+  --aqua-selection-text: #fff;
+  --aqua-focus: #3f9fe8;
+
+  --aqua-graphite-top: #e5e7e9;
+  --aqua-graphite-mid: #aeb4b9;
+  --aqua-graphite-bottom: #737a80;
+
+  --aqua-lcd-top: #e1eaeb;
+  --aqua-lcd-bottom: #aebcc0;
+  --aqua-lcd-text: #172326;
+
+  /* Table and list headers, and the amber gate: the hub window's additions (design/frontends/origin/airwave-hub.html). */
+  --aqua-header-top: #f8f8f8;
+  --aqua-header-bottom: #dadada;
+  --aqua-header-rule: #adadad;
+  --aqua-header-text: #3a3d41;
+  --aqua-warning-bg: #fbf3dc;
+  --aqua-warning-edge: #d8b75e;
+
+  --aqua-danger: #d64a44;
+  /* Ink for a destructive action: dark enough to read as text, not as a filled warning. */
+  --aqua-danger-ink: #7a1712;
+  --aqua-warning: #d9a431;
+  --aqua-success: #4e9d47;
+  --aqua-traffic-close: #e9635b;
+  --aqua-traffic-minimize: #e3b64b;
+  --aqua-traffic-zoom: #58a953;
+
+  --aqua-space-micro: 2px;
+  --aqua-space-tight: 4px;
+  --aqua-space-inline: 6px;
+  --aqua-space-control: 8px;
+  --aqua-space-small-group: 10px;
+  --aqua-space-group: 12px;
+  --aqua-space-frame-top: 14px;
+  --aqua-space-strong-group: 16px;
+  --aqua-space-window-edge: 20px;
+  --aqua-space-major: 24px;
+
+  --aqua-window-radius: 7px;
+  --aqua-panel-radius: 5px;
+  --aqua-control-radius: 5px;
+  --aqua-pill-radius: 999px;
+  --aqua-control-h: 22px;
+  --aqua-control-h-small: 19px;
+  --aqua-control-h-mini: 15px;
+  --aqua-search-h: 22px;
+  --aqua-search-h-small: 19px;
+  --aqua-traffic-size: 12px;
+  --aqua-toolbar-h: 62px;
+  --aqua-table-header-h: 20px;
+  --aqua-row-h: 20px;
+  --aqua-source-row-h: 21px;
+  --aqua-bottom-bar-small: 22px;
+  --aqua-bottom-bar-regular: 32px;
+  --aqua-splitter-hairline: 1px;
+  --aqua-splitter-wide: 9px;
+  --aqua-sidebar-default: 196px;
+  --aqua-sidebar-min: 160px;
+  --aqua-sidebar-max: 280px;
+  --aqua-hit: 32px; /* minimum pointer hit target around compact visuals */
+
+  --aqua-window-shadow:
+    0 18px 42px rgb(0 0 0 / 34%),
+    0 3px 10px rgb(0 0 0 / 28%);
+  --aqua-window-shadow-inactive:
+    0 10px 24px rgb(0 0 0 / 18%),
+    0 2px 6px rgb(0 0 0 / 15%);
+  --aqua-panel-shadow:
+    0 8px 20px rgb(0 0 0 / 28%),
+    0 1px 4px rgb(0 0 0 / 22%);
+  --aqua-control-shadow: 0 1px 1px rgb(0 0 0 / 25%);
+  --aqua-control-inset-top: inset 0 1px 0 rgb(255 255 255 / 95%);
+  --aqua-control-inset-bottom: inset 0 -1px 0 rgb(0 0 0 / 20%);
+  --aqua-focus-shadow:
+    0 0 0 2px rgb(63 159 232 / 48%),
+    0 0 5px rgb(63 159 232 / 58%);
+
+  --aqua-motion-press: 70ms;
+  --aqua-motion-selection: 100ms;
+  --aqua-motion-disclosure: 140ms;
+  --aqua-motion-panel: 200ms;
+  --aqua-motion-pulse: 1650ms;
+  --aqua-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --aqua-anim-state: running; /* paused under reduced motion */
+  --aqua-sheet-travel: 28px; /* 0 under reduced motion: fade only */
+  --aqua-fade: 120ms;
+
+  /* profile-driven behaviour flags */
+  --aqua-source-icon-filter: none;
+  --aqua-title-display: block;
+}
+
+/* --------------------------------------------------------------------------
+   2. Profile overrides (spec §7.4 + §7.5: the iTunes 10 cluster applies as one set)
+   -------------------------------------------------------------------------- */
+[data-aqua-profile="classic-aqua-gel-accent"] {
+  --aqua-blue-specular: #f4fdff;
+  --aqua-blue-top: #c9f2ff;
+  --aqua-blue-mid: #47c5ff;
+  --aqua-blue-lower: #078ce4;
+  --aqua-blue-bottom: #07569e;
+  --aqua-control-h: 22px;
+}
+
+[data-aqua-profile="itunes-10-transition"] {
+  --aqua-sidebar-top: #d6dce1;
+  --aqua-sidebar-bottom: #b9c2ca;
+  --aqua-sidebar-divider: #949ca3;
+  --aqua-sidebar-group-text: #5b6470;
+  --aqua-stripe: #f6f7f8;
+  --aqua-source-row-h: 23px;
+  --aqua-row-h: 22px;
+  --aqua-traffic-size: 10px;
+  --aqua-source-icon-filter: grayscale(1) contrast(0.9) brightness(0.92);
+  --aqua-title-display: none;
+}
+
+/* --------------------------------------------------------------------------
+   3. Reduced motion: no pulse, no marquee, no striped travel, no sheet travel.
+   Honoured from the OS setting and from an explicit attribute (data-aqua-reduced-motion).
+   -------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --aqua-anim-state: paused;
+    --aqua-sheet-travel: 0px;
+    --aqua-motion-panel: 0ms;
+    --aqua-motion-disclosure: 0ms;
+    --aqua-motion-selection: 0ms;
+    --aqua-motion-press: 0ms;
+  }
+}
+
+[data-aqua-reduced-motion="true"] {
+  --aqua-anim-state: paused;
+  --aqua-sheet-travel: 0px;
+  --aqua-motion-panel: 0ms;
+  --aqua-motion-disclosure: 0ms;
+  --aqua-motion-selection: 0ms;
+  --aqua-motion-press: 0ms;
+}
+
+
+
+/* --------------------------------------------------------------------------
+   4. Base
+   -------------------------------------------------------------------------- */
+.aqua-root,
+.np-app {
+  color: var(--aqua-text);
+  font: var(--aqua-weight-regular) var(--aqua-font-system) / var(--aqua-line-body) var(--aqua-font);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* The roots are in this list as well as their descendants: a root with a
+   1px border given `width: 100%` would otherwise be 2px wider than what
+   contains it — the sort of overflow that only shows up at one size. */
+.np-app,
+.np-app *,
+.np-app *::before,
+.np-app *::after,
+.aqua-layer,
+.aqua-layer *,
+.aqua-layer *::before,
+.aqua-layer *::after {
+  box-sizing: border-box;
+}
+
+.aqua-visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  margin: -1px !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+  clip: rect(0 0 0 0) !important;
+  clip-path: inset(50%) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
+/* Only the Aqua halo replaces the platform outline; never removed without it */
+.np-app :focus-visible,
+.aqua-layer :focus-visible {
+  outline: 2px solid var(--aqua-focus);
+  outline-offset: 1px;
+}
+
+.aqua-icon {
+  display: inline-block;
+  flex: none;
+  width: 1em;
+  height: 1em;
+  vertical-align: -0.125em;
+  overflow: visible;
+}
+
+.aqua-icon--glyph {
+  fill: currentColor;
+}
+
+.aqua-emphasis {
+  font-weight: var(--aqua-weight-emphasized);
+}
+
+.aqua-secondary {
+  color: var(--aqua-text-secondary);
+  font-size: var(--aqua-font-small);
+}
+
+/* --------------------------------------------------------------------------
+   8. Push buttons (spec §9.13, §12.2)
+   -------------------------------------------------------------------------- */
+/* The anchor variant: an <a> is inline by default and would ignore the control height. */
+.aqua-button--link {
+  box-sizing: border-box;
+  cursor: pointer;
+}
+
+.aqua-button {
+  position: relative;
+  isolation: isolate;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--aqua-space-inline);
+  min-width: 69px;
+  min-height: var(--aqua-control-h);
+  margin: 0;
+  padding: 1px 14px 2px;
+  overflow: hidden;
+  color: var(--aqua-ctl-ink);
+  font: var(--aqua-weight-regular) var(--aqua-font-system) / 18px var(--aqua-font);
+  text-align: center;
+  white-space: nowrap;
+  text-decoration: none;
+  vertical-align: middle;
+  /*
+   * Snow Leopard, not Aqua Extreme.
+   *
+   * The profile is `snow-leopard-itunes-9`, and by 10.6 the push button had lost the pill and the
+   * glass lozenge it wore in 10.2: what is left is a rounded rect with a quiet vertical gradient,
+   * a hairline grey rim that darkens at the bottom, and one pixel of white along the top edge.
+   * There is no gloss step across the middle, because there is no gel to be lit.
+   */
+  background: linear-gradient(to bottom, var(--aqua-ctl-face-1) 0%, var(--aqua-ctl-face-2) 47%, var(--aqua-ctl-face-3) 53%, var(--aqua-ctl-face-4) 100%);
+  border: 1px solid var(--aqua-ctl-border);
+  border-bottom-color: var(--aqua-ctl-border-bottom);
+  border-radius: 4px;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 90%),
+    0 1px 0 rgb(255 255 255 / 55%);
+  cursor: default;
+  -webkit-font-smoothing: antialiased;
+  transition: filter 90ms var(--aqua-ease), transform var(--aqua-motion-press) ease-out, box-shadow var(--aqua-motion-press) ease-out;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* The glass lozenge that filled the top half is gone with the gel it belonged to. */
+
+.aqua-button--small { min-width: 56px; min-height: var(--aqua-control-h-small); padding: 0 11px 1px; font-size: var(--aqua-font-small); line-height: 15px; }
+.aqua-button--mini { min-width: 44px; min-height: var(--aqua-control-h-mini); padding: 0 9px; font-size: var(--aqua-font-mini); line-height: 12px; }
+.aqua-button--wide { min-width: 96px; }
+
+.aqua-button__label { overflow: hidden; text-overflow: ellipsis; }
+.aqua-button__icon { display: inline-flex; font-size: 12px; }
+
+.aqua-button:hover:not(:disabled):not([aria-disabled="true"]) { background: linear-gradient(to bottom, var(--aqua-ctl-face-hover-1) 0%, var(--aqua-ctl-face-hover-2) 47%, var(--aqua-ctl-face-hover-3) 53%, var(--aqua-ctl-face-hover-4) 100%); }
+
+.aqua-button:active:not(:disabled):not([aria-disabled="true"]),
+.aqua-button[data-pressed="true"],
+.aqua-button[aria-pressed="true"] {
+  /* Pressed is a shallower well, not a different object: the same face, darkened, with the light
+     moved to the bottom edge. */
+  background: linear-gradient(to bottom, var(--aqua-ctl-face-active-1) 0%, var(--aqua-ctl-face-active-2) 50%, var(--aqua-ctl-face-active-3) 100%);
+  border-color: var(--aqua-ctl-border-bottom);
+  box-shadow:
+    inset 0 1px 2px rgb(0 0 0 / 22%),
+    inset 0 -1px 0 rgb(255 255 255 / 45%);
+}
+
+.aqua-button:focus-visible {
+  outline: 1px solid var(--aqua-ctl-focus-ring);
+  outline-offset: 2px;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 90%), var(--aqua-focus-shadow);
+}
+
+.aqua-button:disabled,
+.aqua-button[aria-disabled="true"] {
+  color: var(--aqua-text-disabled);
+  background: linear-gradient(to bottom, var(--aqua-ctl-face-disabled-1), var(--aqua-ctl-face-disabled-2));
+  border-color: var(--aqua-ctl-border-disabled);
+  box-shadow: inset 0 1px rgb(255 255 255 / 70%);
+  cursor: not-allowed;
+}
+
+/*
+ * Default (safe) action: the blue button, calm pulse (spec §6.5).
+ *
+ * Snow Leopard's is a *tinted* button rather than a lozenge of blue gel — the same quiet gradient
+ * as its neighbours with the hue turned up, dark ink, and a soft halo that says "Return does this"
+ * without shouting. The pulse stays because the spec asks for it; it is the halo that breathes,
+ * not the face.
+ */
+/*
+ * The default action is where the Aqua blue lives.
+ *
+ * Same rounded rect as every other button — no pill, no glass lozenge, no gloss step — but the face
+ * is the real Aqua gel: a pale cyan cap, a saturated blue body, a specular hairline at the top and
+ * a dark rim, pulsing. That is what Snow Leopard's default button was, and it is the one place on a
+ * form where the system's blue is allowed to be a highlight rather than a selection.
+ */
+.aqua-button[data-default="true"] {
+  color: var(--aqua-ctl-default-ink);
+  background: linear-gradient(to bottom, var(--aqua-ctl-default-1) 0%, var(--aqua-ctl-default-2) 44%, var(--aqua-ctl-default-3) 56%, var(--aqua-ctl-default-4) 100%);
+  border-color: var(--aqua-ctl-default-border);
+  border-bottom-color: var(--aqua-ctl-default-border-bottom);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 88%),
+    inset 0 -1px 0 rgb(0 50 110 / 22%),
+    0 0 0 1px rgb(68 183 247 / 22%),
+    0 0 5px rgb(40 158 229 / 34%);
+  animation: aqua-default-pulse var(--aqua-motion-pulse) ease-in-out infinite;
+  animation-play-state: var(--aqua-anim-state);
+}
+
+.aqua-button[data-default="true"]:hover:not(:disabled):not([aria-disabled="true"]) {
+  background: linear-gradient(to bottom, #dcf0ff 0%, #b3dcfc 44%, #86c3f7 56%, #6cb3f2 100%);
+}
+
+.aqua-button[data-default="true"]:active:not(:disabled) {
+  background: linear-gradient(to bottom, #4f96de 0%, #67a8e8 50%, #86bdf0 100%);
+  border-color: #356db0;
+  box-shadow:
+    inset 0 1px 2px rgb(0 30 80 / 28%),
+    inset 0 -1px 0 rgb(255 255 255 / 35%);
+  animation: none;
+}
+
+.aqua-button[data-default="true"]:disabled {
+  animation: none;
+}
+
+@keyframes aqua-default-pulse {
+  0%, 100% {
+    box-shadow: inset 0 1px var(--aqua-blue-specular), inset 0 -1px rgb(0 40 95 / 38%), 0 1px 1px rgb(0 0 0 / 28%), 0 0 2px rgb(40 158 229 / 26%);
+  }
+  50% {
+    box-shadow: inset 0 1px var(--aqua-blue-specular), inset 0 -1px rgb(0 40 95 / 30%), 0 1px 1px rgb(0 0 0 / 24%), 0 0 7px rgb(40 158 229 / 58%);
+  }
+}
+
+/* Graphite tint: the neutral alternative */
+.aqua-button[data-variant="graphite"] {
+  color: #1d2124;
+  background:
+    linear-gradient(to bottom, rgb(255 255 255 / 80%) 0%, rgb(255 255 255 / 40%) 40%, rgb(255 255 255 / 4%) 50%, rgb(0 0 0 / 5%) 54%, rgb(0 0 0 / 18%) 100%),
+    linear-gradient(to bottom, var(--aqua-graphite-top), var(--aqua-graphite-mid) 55%, var(--aqua-graphite-bottom));
+  border-color: #5c6368;
+  box-shadow: inset 0 1px rgb(255 255 255 / 80%), inset 0 -1px rgb(0 0 0 / 22%), var(--aqua-control-shadow);
+  animation: none;
+}
+
+/* Destructive: neutral geometry, explicit wording, red marker (never a red fill by default) */
+.aqua-button[data-variant="destructive"] {
+  color: var(--aqua-danger-ink);
+  border-color: #8f4a45;
+}
+
+.aqua-button[data-variant="destructive"] .aqua-button__icon { color: var(--aqua-danger); }
+
+.aqua-button[data-busy="true"] { cursor: progress; }
+
+.aqua-button__spinner,
+.aqua-spinner {
+  position: relative;
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+}
+
+.aqua-spinner--large { width: 20px; height: 20px; }
+
+.aqua-spinner i {
+  position: absolute;
+  top: 0;
+  left: calc(50% - 1px);
+  width: 2px;
+  height: 30%;
+  border-radius: 1px;
+  background: currentColor;
+  transform-origin: 50% 166%;
+  opacity: 0.25;
+  animation: aqua-spin 1s linear infinite;
+  animation-play-state: var(--aqua-anim-state);
+}
+
+@keyframes aqua-spin { 0% { opacity: 1; } 100% { opacity: 0.25; } }
+
+/* --------------------------------------------------------------------------
+   9. Icon buttons / rectangular toolbar controls (spec §9.14)
+   -------------------------------------------------------------------------- */
+.aqua-icon-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  min-width: var(--aqua-hit);
+  min-height: var(--aqua-hit);
+  margin: 0;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  background: none;
+  border: 0;
+  cursor: default;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.aqua-icon-button__face {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 22px;
+  color: #1c1c1c;
+  font-size: 13px;
+  background:
+    linear-gradient(to bottom, rgb(255 255 255 / 90%) 0%, rgb(255 255 255 / 40%) 45%, rgb(0 0 0 / 3%) 50%, rgb(0 0 0 / 10%) 100%),
+    linear-gradient(to bottom, #fbfbfb, #dedede 50%, #c9c9c9);
+  border: 1px solid #7a7a7a;
+  border-radius: 4px;
+  box-shadow: var(--aqua-control-inset-top), inset 0 -1px rgb(0 0 0 / 15%), var(--aqua-control-shadow);
+  transition: filter 90ms var(--aqua-ease), box-shadow var(--aqua-motion-press) ease-out;
+}
+
+.aqua-icon-button[data-variant="plain"] .aqua-icon-button__face {
+  width: 24px;
+  height: 20px;
+  color: #3b4046;
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.aqua-icon-button[data-variant="capsule"] .aqua-icon-button__face {
+  width: 34px;
+  border-radius: var(--aqua-pill-radius);
+}
+
+.aqua-icon-button--large .aqua-icon-button__face { width: 40px; height: 32px; font-size: 18px; }
+
+.aqua-icon-button:hover:not(:disabled) .aqua-icon-button__face { filter: brightness(1.04); }
+.aqua-icon-button[data-variant="plain"]:hover:not(:disabled) .aqua-icon-button__face { background: rgb(0 0 0 / 6%); }
+
+.aqua-icon-button:active:not(:disabled) .aqua-icon-button__face,
+.aqua-icon-button[aria-pressed="true"] .aqua-icon-button__face,
+.aqua-icon-button[aria-expanded="true"] .aqua-icon-button__face {
+  background:
+    linear-gradient(to bottom, rgb(0 0 0 / 10%), transparent 45%, rgb(255 255 255 / 10%)),
+    linear-gradient(to bottom, #bcbcbc, #dcdcdc 60%, #c4c4c4);
+  box-shadow: inset 0 2px 3px rgb(0 0 0 / 26%), inset 0 -1px rgb(255 255 255 / 50%);
+}
+
+/* selected toggle: restrained blue inner glow + the glyph itself changes colour (second cue) */
+.aqua-icon-button[aria-pressed="true"] .aqua-icon-button__face {
+  color: #0b4f8f;
+  box-shadow: inset 0 2px 3px rgb(0 40 95 / 28%), inset 0 0 0 1px rgb(56 182 247 / 35%), inset 0 -1px rgb(255 255 255 / 50%);
+}
+
+.aqua-icon-button[data-variant="plain"][aria-pressed="true"] .aqua-icon-button__face {
+  color: #0b4f8f;
+  background: rgb(56 182 247 / 14%);
+  box-shadow: inset 0 1px 2px rgb(0 40 95 / 18%);
+}
+
+.aqua-icon-button:focus-visible { outline: none; }
+.aqua-icon-button:focus-visible .aqua-icon-button__face { outline: 2px solid var(--aqua-focus); outline-offset: 1px; box-shadow: var(--aqua-focus-shadow); }
+
+.aqua-icon-button:disabled { cursor: not-allowed; }
+.aqua-icon-button:disabled .aqua-icon-button__face {
+  color: var(--aqua-text-disabled);
+  filter: grayscale(0.8) contrast(0.75) brightness(1.06);
+  box-shadow: inset 0 1px rgb(255 255 255 / 70%);
+}
+
+.aqua-icon-button[data-busy="true"] { cursor: progress; }
+
+.aqua-icon-button__menu-arrow {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 6px;
+  height: 6px;
+}
+
+/* --------------------------------------------------------------------------
+   10. Segmented control (spec §9.14)
+   -------------------------------------------------------------------------- */
+.aqua-segmented {
+  display: inline-flex;
+  flex: none;
+  border-radius: 4px;
+  overflow: hidden;
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 40%), 0 1px 0 rgb(255 255 255 / 60%);
+  user-select: none;
+}
+
+.aqua-segmented--capsule { border-radius: var(--aqua-pill-radius); }
+
+.aqua-segmented__item {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 36px;
+  min-height: var(--aqua-control-h);
+  padding: 0 10px;
+  color: #2b2e33;
+  font: var(--aqua-weight-regular) var(--aqua-font-small) / 1 var(--aqua-font);
+  white-space: nowrap;
+  background: linear-gradient(to bottom, #fdfdfd 0%, #f0f1f2 48%, #dcdee0 100%);
+  border: 0;
+  cursor: default;
+  -webkit-tap-highlight-color: transparent;
+  transition: filter 90ms var(--aqua-ease);
+}
+
+.aqua-segmented--small .aqua-segmented__item { min-height: var(--aqua-control-h-small); padding: 0 8px; }
+
+.aqua-segmented__item + .aqua-segmented__item { box-shadow: inset 1px 0 0 rgb(0 0 0 / 30%); }
+
+.aqua-segmented__item:hover:not(:disabled) { filter: brightness(1.03); }
+.aqua-segmented__item:active:not(:disabled) { filter: brightness(0.94); }
+
+/* selected segment: depressed, darker, light from below + white glyph (position/depth are the second cue) */
+.aqua-segmented__item[aria-checked="true"] {
+  color: #fff;
+  background: linear-gradient(to bottom, #767c85 0%, #939aa3 55%, #a9b0b8 100%);
+  box-shadow: inset 0 2px 3px rgb(0 0 0 / 42%), inset 1px 0 0 rgb(0 0 0 / 25%);
+  text-shadow: 0 -1px 0 rgb(0 0 0 / 35%);
+}
+
+.aqua-segmented--aqua .aqua-segmented__item[aria-checked="true"] {
+  background: linear-gradient(to bottom, var(--aqua-selection-bottom) 0%, var(--aqua-selection-mid) 60%, var(--aqua-selection-top) 100%);
+  box-shadow: inset 0 2px 3px rgb(0 30 80 / 45%), inset 1px 0 0 rgb(0 0 0 / 25%);
+}
+
+.aqua-segmented__item:disabled { color: var(--aqua-text-disabled); }
+
+.aqua-segmented__item:focus-visible { outline-offset: -3px; z-index: 1; }
+
+.aqua-segmented__item .aqua-icon { font-size: 14px; filter: drop-shadow(0 1px 0 rgb(255 255 255 / 75%)); }
+.aqua-segmented__item[aria-checked="true"] .aqua-icon { filter: drop-shadow(0 -1px 0 rgb(0 0 0 / 45%)); }
+
+/* --------------------------------------------------------------------------
+   11. Checkbox (spec §9.16)
+   -------------------------------------------------------------------------- */
+.aqua-check {
+  position: relative;
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-height: 18px;
+  font-size: var(--aqua-font-system);
+  line-height: 18px;
+  cursor: default;
+}
+
+.aqua-check__input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.aqua-check__box {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-top: 2px;
+  color: var(--aqua-ctl-box-ink);
+  background: linear-gradient(to bottom, var(--aqua-ctl-box-1), var(--aqua-ctl-box-2) 55%, var(--aqua-ctl-box-3));
+  border: 1px solid var(--aqua-ctl-box-border);
+  border-bottom-color: var(--aqua-ctl-border-bottom);
+  border-radius: 3px;
+  box-shadow: inset 0 1px rgb(255 255 255 / 90%), 0 1px 0 rgb(255 255 255 / 60%);
+  transition: box-shadow var(--aqua-motion-press) ease-out;
+}
+
+.aqua-check__box svg { width: 10px; height: 10px; opacity: 0; }
+
+.aqua-check__input:checked + .aqua-check__box,
+.aqua-check__input:indeterminate + .aqua-check__box {
+  /* Checked is a tinted box, not a gel bead: 10.6 fills it with a flat-ish blue and puts a white
+     tick on top. */
+  color: #fff;
+  background: linear-gradient(to bottom, var(--aqua-ctl-box-on-1) 0%, var(--aqua-ctl-box-on-2) 52%, var(--aqua-ctl-box-on-3) 100%);
+  border-color: var(--aqua-ctl-box-on-border);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 55%),
+    0 1px 0 rgb(255 255 255 / 60%);
+}
+
+.aqua-check__input:checked + .aqua-check__box svg,
+.aqua-check__input:indeterminate + .aqua-check__box .aqua-check__dash { opacity: 1; }
+
+.aqua-check__dash { display: block; width: 8px; height: 2px; background: #fff; border-radius: 1px; opacity: 0; }
+
+.aqua-check:hover .aqua-check__box { border-color: #8d8d8d; }
+.aqua-check:active .aqua-check__box { box-shadow: inset 0 2px 3px rgb(0 0 0 / 25%); }
+
+.aqua-check__input:focus-visible + .aqua-check__box {
+  outline: 2px solid var(--aqua-focus);
+  outline-offset: 1px;
+  box-shadow: var(--aqua-focus-shadow);
+}
+
+.aqua-check__input:disabled + .aqua-check__box { filter: grayscale(0.8) contrast(0.75) brightness(1.08); }
+.aqua-check__input:disabled ~ .aqua-check__label { color: var(--aqua-text-disabled); }
+
+.aqua-check__label { min-width: 0; }
+
+/* --------------------------------------------------------------------------
+   12. Text field, validation, pop-up menu (spec §9.16)
+   -------------------------------------------------------------------------- */
+.aqua-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.aqua-field--inline { grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; }
+
+.aqua-field__label {
+  font-size: var(--aqua-font-system);
+  line-height: 1.2;
+}
+
+.aqua-field--inline .aqua-field__label { text-align: right; }
+
+.aqua-field__control { position: relative; display: flex; align-items: center; min-width: 0; }
+
+.aqua-field__input {
+  width: 100%;
+  min-width: 0;
+  min-height: var(--aqua-control-h);
+  margin: 0;
+  padding: 1px 6px;
+  color: var(--aqua-text);
+  font: var(--aqua-weight-regular) var(--aqua-font-system) / 18px var(--aqua-font);
+  background: var(--aqua-ctl-field-bg);
+  border: 1px solid var(--aqua-ctl-field-border);
+  border-top-color: var(--aqua-ctl-field-border-top);
+  border-radius: 0;
+  box-shadow: inset 0 1px 2px rgb(0 0 0 / 15%), 0 1px rgb(255 255 255 / 60%);
+  outline: none;
+  transition: box-shadow 100ms var(--aqua-ease), border-color 100ms var(--aqua-ease);
+}
+
+textarea.aqua-field__input { min-height: 60px; line-height: 1.35; resize: vertical; }
+
+.aqua-field__input::placeholder { color: var(--aqua-ctl-placeholder); opacity: 1; }
+
+.aqua-field__input:focus-visible {
+  border-color: var(--aqua-ctl-field-focus-border);
+  outline: none;
+  box-shadow: inset 0 1px 2px rgb(0 0 0 / 15%), var(--aqua-focus-shadow);
+}
+
+.aqua-field__input[aria-invalid="true"] {
+  border-color: var(--aqua-ctl-field-invalid-border);
+  padding-right: 24px;
+}
+
+.aqua-field__input[aria-invalid="true"]:focus-visible {
+  box-shadow: inset 0 1px 2px rgb(0 0 0 / 15%), 0 0 0 2px rgb(214 74 68 / 40%), 0 0 5px rgb(214 74 68 / 50%);
+}
+
+.aqua-field__input:disabled { color: var(--aqua-text-disabled); background: #f4f4f4; border-color: #c4c4c4; }
+
+.aqua-field__marker {
+  position: absolute;
+  right: 6px;
+  display: inline-flex;
+  color: var(--aqua-danger);
+  font-size: 13px;
+  pointer-events: none;
+}
+
+.aqua-field__hint { color: var(--aqua-text-secondary); font-size: var(--aqua-font-small); line-height: 1.3; }
+
+.aqua-validation {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  margin: 0;
+  color: var(--aqua-text);
+  font-size: var(--aqua-font-small);
+  line-height: 1.3;
+}
+
+.aqua-validation__icon { display: inline-flex; flex: none; margin-top: 1px; font-size: 12px; }
+.aqua-validation[data-kind="error"] .aqua-validation__icon { color: var(--aqua-danger); }
+.aqua-validation[data-kind="warning"] .aqua-validation__icon { color: #a97a12; }
+.aqua-validation[data-kind="success"] .aqua-validation__icon { color: var(--aqua-success); }
+.aqua-validation[data-kind="info"] .aqua-validation__icon { color: var(--aqua-selection-bottom); }
+.aqua-validation[data-kind="error"] { color: #7a1712; }
+
+.aqua-popup {
+  position: relative;
+  display: inline-grid;
+  grid-template-columns: minmax(0, 1fr) 18px;
+  align-items: center;
+  min-width: 96px;
+  min-height: var(--aqua-control-h);
+  color: var(--aqua-ctl-ink);
+  font: var(--aqua-weight-regular) var(--aqua-font-system) / 18px var(--aqua-font);
+  /* The same face as the push button: 10.6's pop-up is a rounded rect with a blue chevron block
+     at its right end, not a glass pill. */
+  background: linear-gradient(to bottom, var(--aqua-ctl-face-1) 0%, var(--aqua-ctl-face-2) 47%, var(--aqua-ctl-face-3) 53%, var(--aqua-ctl-face-4) 100%);
+  border: 1px solid var(--aqua-ctl-border);
+  border-bottom-color: var(--aqua-ctl-border-bottom);
+  border-radius: 4px;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 90%),
+    0 1px 0 rgb(255 255 255 / 55%);
+}
+
+.aqua-popup--small { min-height: var(--aqua-control-h-small); font-size: var(--aqua-font-small); }
+
+.aqua-popup__select {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  width: 100%;
+  min-height: inherit;
+  margin: 0;
+  padding: 0 24px 1px 10px;
+  color: inherit;
+  font: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: inherit;
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: default;
+}
+
+.aqua-popup__select:focus-visible { outline: none; }
+.aqua-popup:focus-within { outline: 2px solid var(--aqua-focus); outline-offset: 1px; box-shadow: var(--aqua-focus-shadow); }
+
+.aqua-popup__end {
+  grid-column: 2;
+  grid-row: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: calc(100% - 2px);
+  margin: 1px 1px 1px 0;
+  color: #fff;
+  font-size: 8px;
+  background: linear-gradient(to bottom, var(--aqua-blue-top), var(--aqua-blue-mid) 50%, var(--aqua-blue-bottom));
+  border-left: 1px solid rgb(0 0 0 / 20%);
+  border-radius: 0 3px 3px 0;
+  box-shadow: inset 0 1px rgb(255 255 255 / 60%);
+  pointer-events: none;
+}
+
+.aqua-popup__end svg { width: 8px; height: 10px; }
+
+.aqua-popup:hover:not(:has(:disabled)) { background: linear-gradient(to bottom, #fff 0%, #f8f8f8 47%, #ececec 53%, #e3e3e3 100%); }
+.aqua-popup:has(:disabled) { color: var(--aqua-text-disabled); filter: grayscale(0.8) contrast(0.75) brightness(1.08); }
+.aqua-popup[data-tint="graphite"] .aqua-popup__end {
+  background: linear-gradient(to bottom, var(--aqua-graphite-top), var(--aqua-graphite-mid) 55%, var(--aqua-graphite-bottom));
+}
+
+/* --------------------------------------------------------------------------
+   13. Sliders and progress (spec §9.17)
+   -------------------------------------------------------------------------- */
+.aqua-slider {
+  display: inline-grid;
+  grid-template-columns: minmax(80px, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.aqua-slider__track {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-height: var(--aqua-hit);
+  min-width: 0;
+  cursor: default;
+  touch-action: none;
+}
+
+.aqua-slider__channel {
+  position: relative;
+  flex: 1 1 auto;
+  height: 5px;
+  background: linear-gradient(#b7b7b7, #e9e9e9 60%, #f4f4f4);
+  border: 1px solid #8c8c8c;
+  border-radius: 3px;
+  box-shadow: inset 0 1px 2px rgb(0 0 0 / 25%), 0 1px rgb(255 255 255 / 60%);
+}
+
+.aqua-slider__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--aqua-fill, 0%);
+  background: linear-gradient(to bottom, var(--aqua-blue-top), var(--aqua-blue-mid) 50%, var(--aqua-blue-lower));
+  border-radius: 3px;
+  box-shadow: inset 0 1px rgb(255 255 255 / 55%);
+}
+
+.aqua-slider__thumb {
+  position: absolute;
+  top: 50%;
+  left: var(--aqua-fill, 0%);
+  width: 15px;
+  height: 15px;
+  margin-left: -7.5px;
+  background: linear-gradient(to bottom, #fff 0%, #f2f3f4 52%, #dfe1e4 100%);
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 34%), inset 0 1px 0 rgb(255 255 255 / 90%), 0 1px 2px rgb(0 0 0 / 38%);
+  transform: translateY(-50%);
+  transition: filter 90ms var(--aqua-ease);
+  pointer-events: none;
+}
+
+.aqua-slider__track:hover .aqua-slider__thumb { filter: brightness(1.03); }
+.aqua-slider__track[data-dragging="true"] .aqua-slider__thumb { background: linear-gradient(to bottom, #e9eaec 0%, #d7d9dc 52%, #c8cbcf 100%); box-shadow: inset 0 0 0 1px rgb(0 0 0 / 40%), inset 0 1px 2px rgb(0 0 0 / 25%), 0 1px 1px rgb(0 0 0 / 30%); }
+.aqua-slider__track:focus-visible { outline: none; }
+.aqua-slider__track:focus-visible .aqua-slider__thumb { outline: 2px solid var(--aqua-focus); outline-offset: 1px; box-shadow: inset 0 0 0 1px rgb(0 0 0 / 34%), inset 0 1px 0 rgb(255 255 255 / 90%), var(--aqua-focus-shadow); }
+.aqua-slider__track[aria-disabled="true"] { cursor: not-allowed; }
+.aqua-slider__track[aria-disabled="true"] .aqua-slider__fill { filter: grayscale(0.9) brightness(1.1); }
+.aqua-slider__track[aria-disabled="true"] .aqua-slider__thumb { filter: grayscale(0.8) contrast(0.75) brightness(1.06); }
+
+.aqua-slider__value {
+  width: 4.5em;
+  min-height: var(--aqua-control-h-small);
+  padding: 0 4px;
+  color: var(--aqua-text);
+  font: var(--aqua-weight-regular) var(--aqua-font-small) / 15px var(--aqua-font);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  background: var(--aqua-ctl-field-bg);
+  border: 1px solid var(--aqua-ctl-field-border);
+  border-top-color: var(--aqua-ctl-field-border-top);
+  box-shadow: inset 0 1px 2px rgb(0 0 0 / 15%);
+}
+
+.aqua-slider__value:focus-visible { border-color: #1768a7; outline: none; box-shadow: inset 0 1px 2px rgb(0 0 0 / 15%), var(--aqua-focus-shadow); }
+
+.aqua-slider__readout { color: var(--aqua-text-secondary); font-size: var(--aqua-font-small); font-variant-numeric: tabular-nums; }
+
+.aqua-progress {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.aqua-progress__row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+
+.aqua-progress__bar {
+  position: relative;
+  height: 14px;
+  overflow: hidden;
+  background: linear-gradient(#a6a6a6, #ededed 35%, #f7f7f7);
+  border: 1px solid #797979;
+  border-radius: var(--aqua-pill-radius);
+  box-shadow: inset 0 1px 2px rgb(0 0 0 / 28%), 0 1px rgb(255 255 255 / 60%);
+}
+
+.aqua-progress--small .aqua-progress__bar { height: 9px; }
+
+.aqua-progress__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--aqua-progress, 0%);
+  min-width: 0;
+  background:
+    linear-gradient(to bottom, rgb(255 255 255 / 76%), transparent 44%),
+    repeating-linear-gradient(120deg, rgb(255 255 255 / 13%) 0 5px, transparent 5px 10px),
+    linear-gradient(var(--aqua-blue-top), var(--aqua-blue-mid) 48%, var(--aqua-blue-bottom));
+  border-right: 1px solid var(--aqua-blue-rim);
+  box-shadow: inset 0 1px var(--aqua-blue-specular), inset 0 -1px rgb(0 40 95 / 35%);
+  transition: width 160ms ease-out;
+}
+
+/* paused/inactive: the fill loses Aqua priority but keeps its extent */
+.aqua-progress[data-paused="true"] .aqua-progress__fill {
+  background:
+    linear-gradient(to bottom, rgb(255 255 255 / 70%), transparent 44%),
+    linear-gradient(#d8dcdf, #aeb4b9 48%, #858c92);
+  border-right-color: #6a7176;
+}
+
+/* indeterminate: period striped cylinder that travels; stops under reduced motion */
+.aqua-progress--indeterminate .aqua-progress__fill {
+  width: 100%;
+  background:
+    linear-gradient(to bottom, rgb(255 255 255 / 70%), transparent 44%),
+    repeating-linear-gradient(120deg, rgb(255 255 255 / 0%) 0 6px, rgb(255 255 255 / 34%) 6px 12px, rgb(255 255 255 / 0%) 12px 18px),
+    linear-gradient(var(--aqua-blue-top), var(--aqua-blue-mid) 48%, var(--aqua-blue-bottom));
+  background-size: auto, 21px 100%, auto;
+  border-right: 0;
+  animation: aqua-progress-stripes 1100ms linear infinite;
+  animation-play-state: var(--aqua-anim-state);
+}
+
+@keyframes aqua-progress-stripes {
+  from { background-position: 0 0, 0 0, 0 0; }
+  to { background-position: 0 0, 21px 0, 0 0; }
+}
+
+.aqua-progress__text {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--aqua-text-secondary);
+  font-size: var(--aqua-font-small);
+  line-height: 1.3;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.aqua-progress__value { color: var(--aqua-text-secondary); font-size: var(--aqua-font-small); font-variant-numeric: tabular-nums; }
+
+/* --------------------------------------------------------------------------
+   19. Table / list view (spec §9.8, §12.6) — a real <table>; rows may be virtualized
+   -------------------------------------------------------------------------- */
+.aqua-table-wrap {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  background: var(--aqua-content);
+  outline: none;
+}
+
+.aqua-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
+  color: var(--aqua-text);
+  font: var(--aqua-weight-regular) var(--aqua-font-view) / var(--aqua-line-compact) var(--aqua-font);
+  user-select: none;
+}
+
+.aqua-table th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: var(--aqua-table-header-h);
+  padding: 0;
+  overflow: hidden;
+  color: #303438;
+  font-size: var(--aqua-font-small);
+  font-weight: var(--aqua-weight-regular);
+  text-align: left;
+  white-space: nowrap;
+  background: linear-gradient(#fff, #eceeef);
+  border-right: 1px solid #d2d5d7;
+  border-bottom: 1px solid #aeb3b7;
+  box-shadow: inset 0 1px #fff;
+}
+
+.aqua-table th:last-child { border-right: 0; }
+
+.aqua-table__sort {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  width: 100%;
+  height: var(--aqua-table-header-h);
+  margin: 0;
+  padding: 0 6px;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  background: transparent;
+  border: 0;
+  cursor: default;
+}
+
+.aqua-table__sort:hover { background: linear-gradient(#f4f4f4, #e3e5e6); }
+.aqua-table__sort:focus-visible { outline-offset: -2px; }
+/* Only the column actually sorted: every sortable header carries aria-sort="none", so a bare
+   [aria-sort] would paint the whole header row as if it were all sorted at once. */
+.aqua-table th[aria-sort]:not([aria-sort="none"]) .aqua-table__sort { background: linear-gradient(#e8eef7, #cfdbeb); color: var(--aqua-text); }
+.aqua-table th[aria-sort]:not([aria-sort="none"]) .aqua-table__sort:hover { background: linear-gradient(#dde7f4, #c2d2e6); }
+.aqua-table__sort-glyph { font-size: 8px; opacity: 0.7; }
+.aqua-table__header-label { overflow: hidden; text-overflow: ellipsis; }
+.aqua-table th.aqua-table--num .aqua-table__sort { flex-direction: row-reverse; }
+
+.aqua-table td {
+  height: var(--aqua-row-h);
+  padding: 0 6px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
+.aqua-table--num { text-align: right; font-variant-numeric: tabular-nums; }
+.aqua-table--center { text-align: center; }
+.aqua-table--icon { padding: 0 !important; text-align: center; }
+
+.aqua-table tbody tr { cursor: default; }
+.aqua-table tbody tr:nth-child(even) { background: var(--aqua-stripe); }
+.aqua-table tbody tr[aria-current="true"] { background: #dde9f8; }
+
+.aqua-table tbody tr[aria-selected="true"],
+.aqua-table tbody tr[aria-selected="true"]:nth-child(even) {
+  color: var(--aqua-selection-text);
+  background: linear-gradient(var(--aqua-selection-top), var(--aqua-selection-mid) 46%, var(--aqua-selection-bottom));
+  text-shadow: 0 1px rgb(0 45 90 / 40%);
+}
+
+.aqua-table tbody tr[aria-selected="true"] .aqua-secondary { color: rgb(255 255 255 / 85%); }
+
+.aqua-table-wrap:not(:focus-within) .aqua-table tbody tr[aria-selected="true"] {
+  color: #20252a;
+  background: linear-gradient(#d3d8dc, #b5bdc4);
+  text-shadow: 0 1px rgb(255 255 255 / 54%);
+}
+
+.aqua-table tbody tr:focus-visible { outline: 2px solid var(--aqua-focus); outline-offset: -2px; }
+.aqua-table tbody tr[aria-disabled="true"] { color: var(--aqua-text-disabled); }
+
+.aqua-table__spacer td { padding: 0; height: auto; }
+.aqua-table__empty td { height: 60px; color: var(--aqua-text-secondary); text-align: center; }
+
+/* narrow: primary label / secondary metadata rows, never cards (spec §8.3) */
+@media (max-width: 479px) {
+  .aqua-table--responsive th:not(.aqua-table__col--keep),
+  .aqua-table--responsive td:not(.aqua-table__col--keep) { display: none;}
+  /* `height` on a cell is a minimum, not a fixed size, so the row still grows
+     to fit two lines — while keeping the floor that `height: auto` gave away. */
+  .aqua-table--responsive td.aqua-table__col--keep { white-space: normal; padding-block: 3px;}
+  .aqua-table--responsive .aqua-table__stack { display: block;}
+  /* Fixed layout would hold the hidden columns' widths open, leaving most of each row without a
+     cell: blank, and dead to the pointer, since a click there lands on the table rather than the
+     row. Found in the page list, fixed in both. */
+  .aqua-table--responsive { table-layout: auto;}
+  /* Column widths are inline styles from the column definitions; only !important takes them back. */
+  .aqua-table--responsive col { width: auto !important;}}
+.aqua-table__stack { display: none; color: var(--aqua-text-secondary); font-size: var(--aqua-font-small); }
+
+/* --------------------------------------------------------------------------
+   22. Layers: sheet, alert, toast (spec §9.19, §9.20)
+   -------------------------------------------------------------------------- */
+.aqua-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  color: var(--aqua-text);
+  font: var(--aqua-weight-regular) var(--aqua-font-system) / var(--aqua-line-body) var(--aqua-font);
+  pointer-events: none;
+}
+
+.aqua-layer > * { pointer-events: auto; }
+
+.aqua-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgb(0 0 0 / 18%);
+  animation: aqua-fade-in var(--aqua-fade) ease-out;
+}
+
+.aqua-backdrop--clear { background: transparent; }
+
+@keyframes aqua-fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+.aqua-sheet {
+  position: fixed;
+  top: 0;
+  left: 50%;
+  display: flex;
+  flex-direction: column;
+  width: min(420px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  color: var(--aqua-text);
+  background: var(--aqua-window-body);
+  border: 1px solid #6f6f6f;
+  border-top: 0;
+  border-radius: 0 0 var(--aqua-panel-radius) var(--aqua-panel-radius);
+  box-shadow: var(--aqua-panel-shadow);
+  transform: translateX(-50%);
+  animation: aqua-sheet-attach var(--aqua-motion-panel) var(--aqua-ease);
+}
+
+.aqua-sheet--anchored { position: absolute; }
+.aqua-sheet--wide { width: min(640px, calc(100vw - 24px)); }
+.aqua-sheet--window { top: 50%; border-top: 1px solid #6f6f6f; border-radius: var(--aqua-panel-radius); transform: translate(-50%, -50%); animation: aqua-fade-in var(--aqua-fade) ease-out; }
+
+@keyframes aqua-sheet-attach {
+  from { opacity: 0; transform: translate(-50%, calc(-1 * var(--aqua-sheet-travel))); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+.aqua-sheet__body { display: grid; gap: var(--aqua-space-group); padding: var(--aqua-space-frame-top) var(--aqua-space-window-edge) 0; overflow: auto; }
+.aqua-sheet__header { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; align-items: start; }
+.aqua-sheet__icon { display: inline-flex; font-size: 32px; color: #4b5560; }
+.aqua-sheet__title { margin: 0; font-size: var(--aqua-font-system); font-weight: var(--aqua-weight-emphasized); line-height: 1.3; }
+.aqua-sheet__message { margin: 4px 0 0; color: var(--aqua-text); font-size: var(--aqua-font-small); line-height: 1.4; }
+.aqua-sheet__actions { display: flex; flex-wrap: wrap; gap: var(--aqua-space-group); justify-content: flex-end; padding: var(--aqua-space-strong-group) var(--aqua-space-window-edge) var(--aqua-space-window-edge); }
+.aqua-sheet__actions--split { justify-content: space-between; }
+.aqua-sheet__actions-group { display: flex; gap: var(--aqua-space-group); }
+
+@keyframes aqua-menu-in { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: none; } }
+/* A destructive item is named by its ink, not by a colour pasted into the markup. Separation
+   from the ordinary items is the separator above it; the wording is the caller's. */
+
+.aqua-toast-region {
+  position: fixed;
+  right: 0;
+  bottom: 12px;
+  left: 0;
+  z-index: 1002;
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.aqua-toast {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(480px, calc(100vw - 32px));
+  padding: 6px 12px;
+  color: var(--aqua-text);
+  font-size: var(--aqua-font-small);
+  background: linear-gradient(#f7f7f7, #e6e6e6);
+  border: 1px solid rgb(0 0 0 / 35%);
+  border-radius: var(--aqua-panel-radius);
+  box-shadow: inset 0 1px #fff, var(--aqua-panel-shadow);
+  pointer-events: auto;
+  animation: aqua-menu-in var(--aqua-motion-selection) ease-out;
+}
+
+.aqua-toast[data-kind="error"] { border-color: #a7423d; }
+.aqua-toast[data-kind="success"] .aqua-toast__icon { color: var(--aqua-success); }
+.aqua-toast[data-kind="error"] .aqua-toast__icon { color: var(--aqua-danger); }
+.aqua-toast[data-kind="warning"] .aqua-toast__icon { color: #a97a12; }
+.aqua-toast__icon { display: inline-flex; font-size: 13px; }
+.aqua-toast__text { min-width: 0; }
+.aqua-toast .aqua-button { min-width: 0; }
+
+/* --------------------------------------------------------------------------
+   23. State panels: empty and loading
+   Same material and type system (spec §18).
+   -------------------------------------------------------------------------- */
+.aqua-state {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  max-width: 420px;
+  margin: 0 auto;
+  padding: 32px 20px;
+  color: var(--aqua-text);
+  text-align: center;
+}
+
+.aqua-state--inline { padding: 12px 16px; max-width: none; justify-items: start; text-align: left; grid-template-columns: auto minmax(0, 1fr); align-items: start; column-gap: 10px; }
+.aqua-state--inline > * { grid-column: 2; }
+.aqua-state--inline .aqua-state__icon { grid-column: 1; grid-row: 1 / span 3; font-size: 20px; margin-top: 2px; }
+
+.aqua-state__icon { display: inline-flex; color: #5d6772; font-size: 40px; }
+.aqua-state__title { margin: 0; font-size: var(--aqua-font-system); font-weight: var(--aqua-weight-emphasized); }
+.aqua-state__text { margin: 0; color: var(--aqua-text-secondary); font-size: var(--aqua-font-small); line-height: 1.45; }
+.aqua-state__actions { display: flex; flex-wrap: wrap; gap: var(--aqua-space-control); justify-content: center; margin-top: 4px; }
+.aqua-state--inline .aqua-state__actions { justify-content: flex-start; }
+.aqua-state__progress { width: min(320px, 100%); }
+.aqua-state__details { width: 100%; margin-top: 4px; color: var(--aqua-text-secondary); font-size: var(--aqua-font-small); text-align: left; }
+.aqua-state__details summary { cursor: default; color: var(--aqua-selection-bottom); }
+.aqua-state__details summary:focus-visible { outline-offset: 2px; }
+.aqua-state__details p { margin: 6px 0 0; padding: 6px 8px; background: var(--aqua-content-muted); border: 1px solid var(--aqua-row-divider); border-radius: 3px; }
+
+/* --------------------------------------------------------------------------
+   24. Marquee (playing row), panels, status dots
+   -------------------------------------------------------------------------- */
+.aqua-marquee {
+  --mq-fade-l: 0px;
+  --mq-fade-r: 0px;
+  display: block;
+  overflow-x: clip;
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 var(--mq-fade-l), #000 calc(100% - var(--mq-fade-r)), transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 var(--mq-fade-l), #000 calc(100% - var(--mq-fade-r)), transparent 100%);
+}
+@supports not (overflow-x: clip) { .aqua-marquee { overflow: hidden; } }
+.aqua-marquee__inner { display: inline-block; white-space: nowrap; will-change: transform; }
+.aqua-marquee--static { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.aqua-panel {
+  display: grid;
+  gap: var(--aqua-space-group);
+  padding: var(--aqua-space-frame-top) var(--aqua-space-window-edge) var(--aqua-space-window-edge);
+  min-width: 0;
+}
+.aqua-panel__title { margin: 0; font-size: var(--aqua-font-system); font-weight: var(--aqua-weight-emphasized); }
+.aqua-panel__section { display: grid; gap: var(--aqua-space-control); padding: var(--aqua-space-group); background: var(--aqua-content); border: 1px solid var(--aqua-row-divider); border-radius: var(--aqua-panel-radius); }
+.aqua-panel__section-title { margin: 0; color: var(--aqua-text-secondary); font-size: var(--aqua-font-small); font-weight: var(--aqua-weight-emphasized); text-transform: uppercase; letter-spacing: 0.03em; }
+.aqua-kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; margin: 0; font-size: var(--aqua-font-small); }
+.aqua-kv dt { color: var(--aqua-text-secondary); }
+.aqua-kv dd { margin: 0; overflow: hidden; text-overflow: ellipsis; }
+.aqua-status-dot { display: inline-block; width: 8px; height: 8px; margin-right: 5px; border-radius: 50%; background: #9aa1a8; box-shadow: inset 0 1px rgb(255 255 255 / 60%), 0 0 0 1px rgb(0 0 0 / 25%); vertical-align: middle; }
+.aqua-status-dot[data-kind="ok"] { background: var(--aqua-success); }
+.aqua-status-dot[data-kind="warning"] { background: var(--aqua-warning); }
+.aqua-status-dot[data-kind="error"] { background: var(--aqua-danger); }
+.aqua-status-dot[data-kind="info"] { background: var(--aqua-selection-mid); }
+
+/* Vertical fader (spec §9.17): the same recessed channel and silver thumb, rotated. Used by the
+   equalizer, where a column of faders is the shape people expect. */
+.aqua-slider--vertical { flex-direction: column; align-items: center; height: 100%; }
+.aqua-slider--vertical .aqua-slider__track { width: 22px; height: 100%; min-height: 96px; padding: 6px 0; cursor: ns-resize; }
+.aqua-slider--vertical .aqua-slider__channel { width: 4px; height: 100%; margin: 0 auto; }
+.aqua-slider--vertical .aqua-slider__fill { width: 100%; height: var(--aqua-fill, 0%); top: auto; bottom: 0; }
+.aqua-slider--vertical .aqua-slider__thumb { left: 50%; top: auto; bottom: var(--aqua-fill, 0%); transform: translate(-50%, 50%); }
+.aqua-slider--vertical .aqua-slider__value { width: 100%; text-align: center; }
+
+/* --------------------------------------------------------------------------
+   Touch.
+
+   Last in the file on purpose. Every rule here raises a control to a 44 px target, and it does
+   so with the same specificity as the rules it is correcting - `.aqua-button` against
+   `.aqua-button--small`, both one class - so source order is the only thing that decides.
+   Moved above the control definitions, these rules lose and every small button silently goes
+   back to 30 px on a phone. Merging the five blocks this used to be into one was safe; merging
+   them at the *top* was not, and the responsive suite caught it.
+   -------------------------------------------------------------------------- */
+@media (pointer: coarse) {
+  :root,
+  [data-aqua-profile] {
+    /* Both Apple and Google ask for 44px; nothing interactive goes below it. */
+    --aqua-hit: 44px;
+
+    /* Type: +2px across the scale, so the hierarchy between steps survives. */
+    --aqua-font-system: 15px;
+    --aqua-font-view: 14px;
+    --aqua-font-small: 13px;
+    --aqua-font-label: 12px;
+    --aqua-font-mini: 11px;
+
+    /* Controls: a finger, not a cursor. */
+    --aqua-control-h: 34px;
+    --aqua-control-h-small: 30px;
+    --aqua-control-h-mini: 26px;
+    --aqua-search-h: 34px;
+    --aqua-search-h-small: 30px;
+
+    /* Rows: a row *is* the target — it carries the roving tabindex and the
+       selection — so it gets the same 44px as everything else rather than the
+       36px that merely looked generous next to a 20px desktop row. */
+    --aqua-table-header-h: 32px;
+    --aqua-row-h: 44px;
+    --aqua-source-row-h: 44px;
+
+    /* Chrome. The toolbar shrinks: its icons grow, but 62px of it on a phone
+       is a third of the screen before any content. */
+    --aqua-toolbar-h: 52px;
+    --aqua-bottom-bar-small: 34px;
+    --aqua-bottom-bar-regular: 40px;
+    --aqua-traffic-size: 14px;}
+
+
+  /* A field is typed into as well as tapped, and its padding puts it just
+     under the line the rest of the controls clear. */
+  .aqua-field__input {
+    min-height: var(--aqua-hit);}
+
+  /* iOS zooms the page when a field under 16px takes focus. */
+  .aqua-field__input,
+  .aqua-select,
+  textarea.aqua-field__input {
+    font-size: 16px;}
+
+  /* The editable number beside a slider is typed into as well as tapped. */
+  .aqua-slider__value {
+    min-height: var(--aqua-hit);
+    font-size: 16px;}
+
+  /* A table's sort header is a button spanning the column. */
+  .aqua-table__sort {
+    min-height: var(--aqua-hit);}
+
+  /* Two segments or three tabs: each gets a finger's width, not a word's. */
+  .aqua-segmented__item {
+    min-width: var(--aqua-hit);}
+
+  /*
+   * A badge keeps its drawn size, so the overlay goes on the badge itself.
+   * A vertical fader is the same case in the other axis: 22px wide is the
+   * groove, and the overlay gives the thumb somewhere to be caught.
+   */
+  .aqua-slider--vertical .aqua-slider__track,
+  .aqua-badge {
+    position: relative;}
+
+  .aqua-badge::after {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: var(--aqua-hit);
+    height: var(--aqua-hit);
+    content: '';
+    transform: translate(-50%, -50%);}
+
+  .aqua-slider--vertical .aqua-slider__track::after {
+    position: absolute;
+    top: 0;
+    left: 50%;
+    width: var(--aqua-hit);
+    height: 100%;
+    content: '';
+    transform: translateX(-50%);}
+/* --------------------------------------------------------------------------
+   Touch, part two: the components
+   --------------------------------------------------------------------------
+
+   The tokens are set in §3b; these are the controls whose size is drawn
+   rather than read from one. They live at the end of the sheet because a
+   component's own rule (`.aqua-button--small { min-height: … }`) would
+   otherwise win on source order — which it did, the first time this was
+   written, leaving every small button 30px tall in a block that asked for 44.
+   -------------------------------------------------------------------------- */
+
+  .aqua-check__box {
+    width: 20px;
+    height: 20px;}
+
+  .aqua-check {
+    gap: 10px;
+    min-height: var(--aqua-hit);}
+
+  .aqua-button,
+  .aqua-button--small,
+  .aqua-segmented__item,
+  .aqua-popup,
+  .aqua-select,
+  .aqua-icon-button {
+    min-height: var(--aqua-hit);}
+
+  .aqua-button {
+    padding-inline: 18px;}
+
+  .aqua-button--small {
+    padding-inline: 14px;}
+
+  /* Mini is the one size that stays visibly small — it exists for a row of
+     actions inside a table cell, where 44px would double the row. It gets the
+     target without the height, from the overlay below. Its *label* is still
+     something someone has to read, so it goes up to the readable minimum with
+     everything else; the button keeps its drawn size either way. */
+  .aqua-button--mini {
+    position: relative;
+    min-height: 32px;
+    padding-inline: 12px;
+    font-size: 12px;
+    line-height: 14px;}
+
+  /*
+   * Where a control has to keep its drawn size, the target grows around it
+   * instead: a transparent overlay, centred, that takes the taps without
+   * moving anything. Nothing else can sit on top of these, so there is no
+   * ambiguity about which one a tap reaches.
+   */
+  .aqua-button--mini::after {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: max(100%, var(--aqua-hit));
+    height: max(100%, var(--aqua-hit));
+    content: '';
+    transform: translate(-50%, -50%);}}
