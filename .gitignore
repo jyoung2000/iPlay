@@ -1,15 +1,71 @@
 node_modules/
 dist/
 build/
-.gradle/
-release/
-*.apk
-*.exe
-*.blockmap
-local.properties
-keystore.properties
-codesign.properties
-*.jks
-*.keystore
-*.pfx
+out/
+coverage/
+.turbo/
+*.tsbuildinfo
+.env
+.env.local
+*.log
+/data/
+docker-container/data/*
+!docker-container/data/.gitkeep
+windows-companion/release/
+music-player/dev-dist/
+playwright-report/
+test-results/
+.playwright-screenshots/
+**/.vite/
+*.partial
+docker-container/dist/
+music-player/dist/
+music-player/test-results/
+music-player/playwright-report/
+docker-container/backups/
+# The CI smoke test bind-mounts this as the hub's data directory.
+.ci-data/
+docker-container/test-results/
+docker-container/playwright-report/
+# The single-file player is *committed* at the repository root as now-playing.html, so it can be
+# downloaded without a toolchain. Only the build directory it is produced in is ignored.
+music-player/dist-local/
+music-player/test-results-local/
+music-player/playwright-report-local/
+
+# The Android build copies the built player in here; it is output, not source.
+android/app/src/main/assets/app/
+android/.gradle/
+android/app/build/
+android/local.properties
+
+# Scratch left behind by browser tooling and audit runs; never source.
+/.playwright-mcp/
+*.tgz
+/team-clone-*.png
+# Bytecode from Python one-offs run against the repository during maintenance passes.
 __pycache__/
+
+# The AWSP sidecar's Cargo build output (Cargo.lock is committed).
+windows-companion/awsp-server/target/
+# The PWA's AWSP client crate's Cargo output. Its wasm-bindgen output is committed, in
+# music-player/src/shell/awsp-web (see music-player/scripts/build-awsp-web.mjs).
+music-player/awsp-web/target/
+
+# Serena (semantic code MCP) per-machine project metadata
+.serena/
+
+# Playwright output kept from failed verify gates (scripts/verify.mjs)
+.verify-artifacts/
+
+.superpowers/
+
+# Per-machine agent CLI config (Codex). Machine-local and a common place for provider
+# credentials to end up, so it is never committed from this repo.
+.codex/
+
+# The discovery demo (discovery-demo/): Python environment and runtime data (DCLAP model, SQLite, logs).
+discovery-demo/server/.venv/
+discovery-demo/.data/
+discovery-demo/windows/release/
+.pytest_cache/
