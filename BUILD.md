@@ -1,6 +1,6 @@
-# jPlay 0.20.2 — building from source
+# jPlay 0.20.3 — building from source
 
-Built from commit 96ed554 (96ed554b1b9500af4af0cbd772368c7d4f58c02d) of the development repository (app folder `discovery-demo/`).
+Built from commit 40ddf80 (40ddf8046328125e534ce539792009938bbd785f) of the development repository (app folder `discovery-demo/`).
 
 ## Layout
 - `discovery-demo/` — the app: `web/` (React UI + recommendation engine), `android/` (Kotlin shell, Android Auto),

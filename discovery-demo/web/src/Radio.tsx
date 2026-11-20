@@ -5,6 +5,7 @@ import { readPlaces, savePlaces, stationInPlace, PLACES_MAX, type RadioPlace } f
 import type { Track } from './api';
 import { genreIdentity } from './engine/genre-identity';
 import { GenreBubbleView } from './Results';
+import { TagStrip } from './TagStrip';
 import { classifyStation, type StationFacts, type StationGenre } from './engine/radio-genres';
 import { SkeletonList, Develop } from './Skeleton';
 import { Glyph } from '@now-playing/aqua-ui/icons';
@@ -187,8 +188,8 @@ export function Radio({ onTune, onOpenArtist, onPlaySong }: { onTune: (s: RadioS
         <span className="radio-search__filters">
           <button type="button" className="radio-search__filter" aria-label="Genre filter" aria-haspopup="listbox" aria-expanded={menu === 'genre'} data-set={tag ? '' : undefined} style={tag ? { ['--tone' as string]: genreTone(tag) } : undefined}
             onClick={() => setMenu(m => m === 'genre' ? '' : 'genre')}>{tag && <span className="radio-search__dot" aria-hidden="true" />}{tag ? (genreIdentity(tag)?.label ?? cap(tag)) : 'Genre'}<span className="radio-search__caret" aria-hidden="true">▾</span></button>
-          <button type="button" className="radio-search__filter" aria-label="Country filter" aria-haspopup="listbox" aria-expanded={menu === 'country'} data-set={country || chosen.length ? '' : undefined}
-            onClick={() => { setPlaceNote(''); setMenu(m => m === 'country' ? '' : 'country'); }}>{chosen.length ? `${chosen[0]!.label.split(',')[0]}${chosen.length > 1 ? ` +${chosen.length - 1}` : ''}` : country ? countryName(country) : 'Country'}<span className="radio-search__caret" aria-hidden="true">▾</span></button>
+          <button type="button" className="radio-search__filter" aria-label="Location filter" aria-haspopup="listbox" aria-expanded={menu === 'country'} data-set={country || chosen.length ? '' : undefined}
+            onClick={() => { setPlaceNote(''); setMenu(m => m === 'country' ? '' : 'country'); }}>{chosen.length ? `${chosen[0]!.label.split(',')[0]}${chosen.length > 1 ? ` +${chosen.length - 1}` : ''}` : country ? countryName(country) : 'Location'}<span className="radio-search__caret" aria-hidden="true">▾</span></button>
           <button type="button" className="radio-search__filter" aria-label="Language filter" aria-haspopup="listbox" aria-expanded={menu === 'language'} data-set={language ? '' : undefined}
             onClick={() => { setLangDraft(language); setMenu(m => m === 'language' ? '' : 'language'); }}>{language ? cap(language) : 'Language'}<span className="radio-search__caret" aria-hidden="true">▾</span></button>
         </span>
@@ -197,7 +198,7 @@ export function Radio({ onTune, onOpenArtist, onPlaySong }: { onTune: (s: RadioS
           {GENRE_SECTIONS.map(x => <button type="button" role="option" key={x} aria-selected={tag === x} onClick={() => { setTag(x); setMenu(''); }}>
             <span className="radio-search__dot" aria-hidden="true" style={{ ['--tone' as string]: genreTone(x) }} />{genreIdentity(x)?.label ?? cap(x)}</button>)}
         </div>}
-        {menu === 'country' && <div className="radio-search__menu radio-search__menu--places" role="listbox" aria-label="Choose a country">
+        {menu === 'country' && <div className="radio-search__menu radio-search__menu--places" role="listbox" aria-label="Choose a location">
           <button type="button" role="option" aria-selected={!country && !chosen.length} onClick={() => { setCountry(''); if (chosen.length) setPlaces(places.map(p => ({ ...p, selected: false }))); setMenu(''); }}>Anywhere</button>
           {/* RADIO-PLACES-001: type a city, address or region, save it, and choose any number of saved places. */}
           <div className="radio-search__lang radio-places__add">
@@ -252,7 +253,7 @@ export function Radio({ onTune, onOpenArtist, onPlaySong }: { onTune: (s: RadioS
             {b.artist && (onOpenArtist && artist ? <button type="button" className="artistlink radio-now__link" aria-label={`Open the artist ${artist.name}`} onClick={() => onOpenArtist(artist)}>{b.artist}</button> : b.artist)}{b.artist ? ' — ' : ''}
             {onPlaySong && match[s.id] ? <button type="button" className="artistlink radio-now__link" aria-label={`Play the song ${b.title}`} onClick={() => onPlaySong(match[s.id]!)}>{b.title}</button> : b.title}
           </> : b ? 'Programme information unavailable' : 'Checking broadcaster…'}</Marquee></span></div>
-          {tags.length > 0 && <div className="radio-station__tags" title={tags.map(g => g.label).join(', ')}>{tags.map((g, i) => <GenreBubbleView key={i} bubble={g} />)}</div>}</div>
+          {tags.length > 0 && <TagStrip className="radio-station__tags" label="Station genres" title={tags.map(g => g.label).join(', ')}>{tags.map((g, i) => <GenreBubbleView key={i} bubble={g} />)}</TagStrip>}</div>
           <div className="radio-station__actions song-actions">
             <PlayDisc className={`radio-station__play${active ? ' is-on' : ''}`} ready playing={active} label={`Play ${s.name}`} title={active ? 'This station is playing' : 'Play this station live'} onPlay={play} />
             <button type="button" className="iconbtn radio-station__star" aria-pressed={starred} aria-label={`Star station ${s.name}`} title={starred ? 'Starred station' : 'Star this station'} onClick={() => void toggle(s)}><Glyph name={starred ? 'star-filled' : 'star'} size={16} /></button>
