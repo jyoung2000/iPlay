@@ -8,14 +8,15 @@
  * requests answered here. Without that (older native builds) it stays the metadata-only first slice,
  * with a separate bounded database so it can never be a second writer on the phone page's Store.
  */
-import { api, type Track } from './api';
+import { api, newEventId, type Track } from './api';
 import { radioSession } from './engine/radio-client';
 import { CarCatalog } from './engine/car-catalog';
 import { openIdbBackend } from './engine/idb';
 import { LocalApi } from './engine/local-api';
 import { runCarSimilar } from './engine/car-similar';
 import { runCarMood } from './engine/car-mood';
-import { pushQueueTopUp, pushSourceUpdates, setMediaHandlers, songFromTrack } from './engine/media-native';
+import { carFeedback, carPlaylistAdd, type CarSaveDeps } from './engine/car-saves';
+import { artistNamesOf, pushCarUnsaved, pushQueueTopUp, pushSourceUpdates, setMediaHandlers, songFromTrack } from './engine/media-native';
 import { ServiceListening } from './engine/service-listening';
 import { applyCarSettings } from './engine/car-settings';
 import { engineSend } from './engine/native-engine';
@@ -122,9 +123,21 @@ async function startService(n: FullBridge): Promise<void> {
     let similarBusy = false;
     const carTrackFor = async (key: string) => (await api.last().catch(() => null))?.items.find((it) => it.track.key === key)?.track
       ?? catalog.find(key) ?? library.tracks.find((t) => t.key === key) ?? null;
+    // CAR-SAVE-HIDDEN-001: the car's star and playlist choice are saved by this engine whenever the phone page is
+    // not in front. A page behind the lock screen is frozen and saved them late, or never.
+    const saves: CarSaveDeps = {
+      findTrack: carTrackFor,
+      feedback: (kind, t, extra) => api.feedback(kind, t, extra),
+      playlists: () => api.playlists(),
+      playlistEdit: (action, body) => api.playlistEdit(action, body),
+      eventId: newEventId,
+      unsaved: pushCarUnsaved,
+    };
     setMediaHandlers({
       catalogSearch: (query, opts) => catalog.searchAll(query, opts),
       identifyAudio: (samples) => catalog.identifyClip(samples),
+      feedback: (id, kind, carTrack) => { void carFeedback(id, kind, carTrack, saves).catch(() => undefined); },
+      playlistAdd: (id, listId, carTrack) => { void carPlaylistAdd(id, listId, carTrack, saves).catch(() => undefined); },
       // CAR-SIMILAR-001: with the phone closed, the car's Find similar runs here, on the same engine.
       findSimilar: async (id) => {
         if (similarBusy) throw new Error('Already looking for similar songs. Try again when that finishes.');
@@ -136,6 +149,16 @@ async function startService(n: FullBridge): Promise<void> {
             song: carSong,
           });
         } finally { similarBusy = false; }
+      },
+      // ARTIST-FAV-CAR-001: with the phone closed, the car's Star the artist button is saved by this engine.
+      starArtists: async (id, credit, carTrack) => {
+        const t = (await carTrackFor(id)) ?? carTrack ?? null;
+        // CAR-ANSWERABLE-001: the car hears which artists this engine really saved.
+        const saved: string[] = [];
+        for (const name of artistNamesOf(t, credit)) {
+          if (await api.editFavArtists({ op: 'add', artist: { name } }).then(() => true).catch(() => false)) saved.push(name);
+        }
+        return saved;
       },
       // CAR-SETTINGS-001: with the phone closed, the car's EQ / discovery / mood choice is saved by this engine.
       carSettings: (change) => { void applyCarSettings(change, { save: api.putSettings, send: engineSend }).catch(() => { /* resent on the next hello */ }); },

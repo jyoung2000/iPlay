@@ -2,6 +2,7 @@
  * Typed client for the discovery sidecar (../server/airwave_discovery/app.py). Shapes mirror what the
  * server returns today; optional fields are the ones the server omits when a provider does not know them.
  */
+import { ListCache, type Held, type WireReply } from './engine/playlist-delta';
 
 export type ProviderId = 'deezer' | 'ytmusic' | 'soundcloud' | 'spotify' | 'apple' | 'bandcamp' | 'audius' | 'hearthis' | 'archive' | 'radio';
 
@@ -118,6 +119,8 @@ export interface ArtistSummary {
   name: string;
   picture: string | null;
   detail: string | null;
+  /** Deezer's follower count when it gives one (ARTIST-SIZE-001 / ARTIST-FAV-001). */
+  fans?: number | null;
   url: string;
   alt?: string;
 }
@@ -310,6 +313,8 @@ export interface RecResult {
   transfer: Record<string, number>;
   candidates?: number;
   empty_reason?: string;
+  /** NEXT-FAV-COLD-001: for a run with no starting song, which of stars / listening / sound it read. */
+  started_from?: string;
   sample?: { label: string; recorded: string };
   /** Set on the last finished queue restored from the server after a reload. */
   saved_at?: number;
@@ -549,6 +554,21 @@ export interface PlaylistItem {
 
 /** A list the listener made. `discovery_ready` is false until every song in it has been played. */
 /** The starting songs, and the saved list they came from when one is the now playing queue. */
+/** ARTIST-FAV-001: a starred artist (engine/fav-artists.ts). */
+export interface FavArtist {
+  name: string;
+  deezerId: string | null;
+  fans: number | null;
+  picture: string | null;
+  pageId: string | null;
+  addedAt: number;
+}
+
+export interface FavArtistsView {
+  artists: FavArtist[];
+  algorithm?: { id: string; name: string };
+}
+
 export interface SeedsView {
   seeds: Track[];
   playlist?: { id: string; name: string } | null;
@@ -610,6 +630,11 @@ export class ApiError extends Error {
 }
 
 // The Android shell injects AirwaveNative; ?local=1 runs the same engine in a desktop browser for testing.
+const listCache = new ListCache();
+const readLists = (have: Held) => call<WireReply>(`/api/playlists?have=${encodeURIComponent(JSON.stringify(have))}`);
+/** For tests: forget the lists this page holds. */
+export const resetListCacheForTest = (): void => listCache.clear();
+
 const inApp = (): boolean => typeof window !== 'undefined' && (Boolean((window as { AirwaveNative?: unknown }).AirwaveNative) || new URLSearchParams(window.location.search).has('local'));
 
 async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -709,6 +734,10 @@ export const api = {
   },
   completeSpotify: (title: string, artist: string) => call<{ tracks: Track[] }>('/api/complete-spotify', { method: 'POST', body: json({ title, artist }) }),
   seeds: () => call<SeedsView>('/api/seeds'),
+/** ARTIST-FAV-ALGO-001: the active algorithm's starred artists, and which algorithm that is. */
+  favArtists: () => call<FavArtistsView>('/api/fav-artists'),
+  editFavArtists: (body: { op: 'add'; artist: { name: string; pageId?: string | null; fans?: number | null; picture?: string | null } } | { op: 'remove'; name: string } | { op: 'set'; artists: unknown[] }) =>
+    call<FavArtistsView>('/api/fav-artists', { method: 'POST', body: json(body) }),
   /** PLAYLIST-QUEUE-001: a saved list takes the place of the now playing queue; every song becomes a starting song. */
   queuePlaylist: (id: string) => call<SeedsView & { missing: number }>('/api/queue/playlist', { method: 'POST', body: json({ id }) }),
   /** Bring back the queue a saved list replaced. */
@@ -753,10 +782,13 @@ export const api = {
   saved: () => call<{ items: SavedItem[] }>('/api/saved'),
   /** TAGS-ALWAYS-001: genres for songs outside the engine's lists (search results); null where nothing is known. */
   genres: (tracks: Track[]) => call<{ items: Record<string, Characteristics | null>; pending?: string[] }>('/api/genres', { method: 'POST', body: json({ tracks }) }),
-  playlists: () => call<{ lists: PlaylistSummary[] }>('/api/playlists'),
+  // PLAYLIST-DELTA-001: the app's own engine is told which lists this page already holds and sends only the rest.
+  playlists: () => (inApp() ? listCache.read(readLists) : call<{ lists: PlaylistSummary[] }>('/api/playlists')),
   /** Every list edit goes through one call and answers with the lists as they now stand. */
   playlistEdit: (action: PlaylistAction, opts: { ids?: string[]; id?: string; name?: string; key?: string; tracks?: Track[]; album?: AlbumView } = {}) =>
-    call<{ lists: PlaylistSummary[] }>('/api/playlists', { method: 'POST', body: json({ action, ...opts }) }),
+    (inApp()
+      ? listCache.read((have) => call<WireReply>('/api/playlists', { method: 'POST', body: json({ action, ...opts, have }) }), readLists)
+      : call<{ lists: PlaylistSummary[] }>('/api/playlists', { method: 'POST', body: json({ action, ...opts }) })),
   health: (refresh = false) => call<Health>(`/api/health${refresh ? '?refresh=1' : ''}`),
   status: () => call<Status>('/api/status'),
   reset: (clearCache: boolean) => call<{ ok: boolean }>('/api/reset', { method: 'POST', body: json({ clear_cache: clearCache }) }),

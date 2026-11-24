@@ -24,16 +24,20 @@ import { QueuePreparation } from './QueuePreparation';
 import { ListDownloadButton, ListFolderButton, ListLoadedNote } from './ListDownloadBar';
 import './discover-tidy.css';
 import { useCardCache } from './useCardCache';
+import { withJob } from './engine/play-state';
 import { useKeptKeys } from './useKeptKeys';
 import { useQueueGenres } from './useQueueGenres';
 import { savedTracks, playbackRows, preparationTracks, contextRows, addTargetOf, addedRow, insertAfter, SEARCH_CONTEXT } from './engine/queue-context';
 import { runCarSimilar } from './engine/car-similar';
 import { captureRows, moodMovable, pinNext, placeMood, playMoodMove } from './engine/mood-apply';
-import { arrangeShuffle, restoreOrder } from './engine/shuffle-order';
+import { arrangeShuffle, heardIn, rememberStarted, restoreOrder, startedOnRecord, unionHeard } from './engine/shuffle-order';
+import { MAX_ARTIST_RUN } from './engine/artist-variety';
 import { phoneWait } from './engine/native-http';
-import { PHONE_LIST, decodeCarAlbumId, decodePlaylistMediaId, mediaNativeAvailable, pickCarContext, pushMediaLibrary, pushMediaState, pushMediaTracks, setMediaHandlers, songFromTrack } from './engine/media-native';
+import { favArtistsStore } from './fav-artists-store';
+import { CAR_NEW_LIST, CAR_NEW_LIST_NAME, PHONE_LIST, artistNamesOf, decodeCarAlbumId, decodePlaylistMediaId, mediaNativeAvailable, pickCarContext, pushMediaLibrary, pushMediaState, pushMediaTracks, setMediaHandlers, songFromTrack } from './engine/media-native';
 import { engineAvailable, engineSend, listenFromEvent, markEngineEvent, subscribeEngineState } from './engine/native-engine';
 import { engineInstance } from './engine/service-listening';
+import { keepTrying } from './engine/playlist-delta';
 import { similarDetail, SimilarNotice, type SimilarNote } from './SimilarNotice';
 import { applyCarSettings, discoveryForEngine } from './engine/car-settings';
 import { SettingsView } from './Settings';
@@ -184,10 +188,20 @@ export function App() {
   });
   /** Songs played this round (the shuffle never repeats one before every other has played) and the order they came in. */
   const heardRef = useRef<Set<string>>(new Set());
+  // SHUFFLE-ONCE-001 (owner, 2026-11-24: "shuffle should only play a song once before finding a new song"): songs
+  // finished or skipped before, on record from earlier sessions and from the car. The queue's shuffle never comes back
+  // to them; a saved list keeps its own rounds.
+  const [heardOnRecord, setHeardOnRecord] = useState<ReadonlySet<string>>(() => startedOnRecord());
   const historyRef = useRef<string[]>([]);
+  /** ARTIST-RUN-001: the artist credits of the songs played, oldest first (the newest few are all it needs). */
+  const artistRunRef = useRef<string[]>([]);
   const [saved, setSaved] = useState<SavedItem[] | null>(null);
   /** The listener's saved lists. Loaded with Saved and refreshed by every list edit. */
-  const [lists, setLists] = useState<PlaylistSummary[]>([]);
+  const [lists, setListsRaw] = useState<PlaylistSummary[]>([]);
+  // PLAYLIST-KEEP-001: "no lists yet" and "the lists have not been read yet" are different things. Until the engine
+  // has answered once, the car is not told the listener has no playlists.
+  const [listsKnown, setListsKnown] = useState(false);
+  const setLists = useCallback((next: PlaylistSummary[]) => { setListsRaw(next); setListsKnown(true); }, []);
   /**
    * Which saved list the current song was started from, or null for the discovery queue. A list
    * is topped up only once everything in it has been played, so the engine needs to know which.
@@ -218,6 +232,18 @@ export function App() {
   const shuffleEpochDone = useRef(-1);
   const unshuffledRef = useRef<string[] | null>(null);
   const discoverShuffleRef = useRef(false);
+  // SHUFFLE-ONCE-001: what the queue's shuffle counts as heard: this session's songs and those on record. A saved list
+  // or a search list counts only its own round. Cached on both sets so a render does not rebuild it.
+  const heardCache = useRef<{ round: Set<string>; size: number; record: ReadonlySet<string>; all: ReadonlySet<string> } | null>(null);
+  const heardNow = (): ReadonlySet<string> => {
+    const round = heardRef.current;
+    if (!discoverShuffleRef.current || !heardOnRecord.size) return round;
+    const c = heardCache.current;
+    if (c && c.round === round && c.size === round.size && c.record === heardOnRecord) return c.all;
+    const all = unionHeard(round, heardOnRecord);
+    heardCache.current = { round, size: round.size, record: heardOnRecord, all };
+    return all;
+  };
   const moodPreferRef = useRef<Map<string, number> | null>(null);
   // ALBUM-NO-X-001 (owner, 2026-11-19): "When listening to an album get rid of the X button." Set while the
   // songs playing come from an album (its page or a saved album); the player then has no Dislike.
@@ -256,6 +282,7 @@ export function App() {
         const f: Record<string, FeedbackFlags> = {};
         for (const [k, v] of Object.entries(fb.state)) f[k] = { like: v.like, dislike: v.dislike, hide: v.hide, save: v.save };
         setFlags(f);
+        setHeardOnRecord(unionHeard(heardIn(fb.state), startedOnRecord()));
         if (fb.taste) setTaste(fb.taste);
         setLoaded(true);
         // Where the listener was when the app last stopped (RESUME-001). Restored only in the
@@ -363,7 +390,10 @@ export function App() {
   );
 
   const run = async (force = false) => {
-    if (!force && !seeds.length) return;
+    // NEXT-FAV-COLD-001 (owner, 2026-11-23): with no starting song the engine starts from the listener's stars,
+    // their listening and their taste map, so a press is never refused here; the engine answers when it truly
+    // has nothing to go on.
+    void force;
     setRunErr(null);
     if (jobRef.current) void api.cancelJob(jobRef.current).catch(() => undefined);
     try {
@@ -585,7 +615,13 @@ export function App() {
     playedRef.current.add(it.track.key);
     if (o?.newRound) { heardRef.current = new Set(); setShuffleEpoch((n) => n + 1); }
     heardRef.current.add(it.track.key);
+    // SHUFFLE-ONCE-001: a song started in the now playing queue is heard for good, even if the app closes mid-way.
+    if ((!o?.keepList || playingContext === null) && !result?.sample) {
+      rememberStarted(it.track.key);
+      if (!heardOnRecord.has(it.track.key)) setHeardOnRecord((h) => new Set(h).add(it.track.key));
+    }
     if (!o?.back) historyRef.current = [...historyRef.current.slice(-199), it.track.key];
+    if (!o?.back) artistRunRef.current = [...artistRunRef.current.slice(-(MAX_ARTIST_RUN - 1)), it.track.artists?.[0] ?? it.track.artist ?? ''];
     setPlaying({ track: it.track, playback: it.playback });
     setFocusKey(it.track.key);
   };
@@ -682,7 +718,7 @@ export function App() {
   const moodListScope = moodOn && playingContext !== null && playingContext !== SEARCH_CONTEXT && shuffle;
   /** A re-rank answer keeps the songs the mood had placed where they were until the mood answers again. */
   const keepMood = (xs: RecItem[]): RecItem[] => {
-    if (discoverShuffleRef.current) return arrangeShuffle(xs, { playingKey, heard: heardRef.current, order: shuffleOrderRef.current, reshuffle: false, rand: Math.random, hidden }).items;
+    if (discoverShuffleRef.current) return arrangeShuffle(xs, { playingKey, heard: heardNow(), order: shuffleOrderRef.current, reshuffle: false, rand: Math.random, hidden }).items;
     if (!moodQueueScope || !moodOrderRef.current.length) return xs;
     const movable = new Set(moodMovable(xs, { currentKey: playingKey, played: playedRef.current, hidden }).map((x) => x.track.key));
     return placeMood(xs, moodOrderRef.current.filter((k) => movable.has(k)));
@@ -743,7 +779,9 @@ export function App() {
   // SHUFFLE-ORDER-001: in the Discover queue the shuffled order is in the list itself, and playback walks it.
   const discoverShuffle = shuffle && playingContext === null && !result?.sample;
   discoverShuffleRef.current = discoverShuffle;
-  const queueOpts = { shuffle, repeat, heard: heardRef.current, ready: stepReady, inOrder: discoverShuffle, mood: discoverShuffle ? null : moodShuffle, prefer: !discoverShuffle && moodOn && shuffle && !moodShuffle ? moodPreferRef.current ?? undefined : undefined };
+  // ARTIST-RUN-001 (owner, 2026-11-24): the Discover queue's shuffle never plays one artist more than four times in a row
+  // while another artist's song is there to play.
+  const queueOpts = { shuffle, repeat, heard: heardNow(), ready: stepReady, inOrder: discoverShuffle, recentArtists: discoverShuffle ? artistRunRef.current : undefined, mood: discoverShuffle ? null : moodShuffle, prefer: !discoverShuffle && moodOn && shuffle && !moodShuffle ? moodPreferRef.current ?? undefined : undefined };
   const nextStep = stepQueue(activeItems, inQueue ? playingKey : null, 1, hidden, queueOpts);
   const back = shuffle ? historyBack(historyRef.current, playingKey, stepReady ? activeItems.filter(x => stepReady(x.track)) : activeItems, hidden) : null;
   const prevStep = shuffle ? (back ? { item: back.item, wrapped: false } : null) : inQueue ? stepQueue(activeItems, playingKey, -1, hidden, queueOpts) : null;
@@ -804,12 +842,12 @@ export function App() {
     const reshuffle = shuffleEpochDone.current !== shuffleEpoch;
     shuffleEpochDone.current = shuffleEpoch;
     const fit = moodOn && moodFitState ? { fit: moodFitState.fit, confidence: moodFitState.confidence, adventurous: settings?.adventurous ?? 0.5 } : null;
-    const r = arrangeShuffle(result.items, { playingKey, heard: heardRef.current, order: shuffleOrderRef.current, reshuffle, rand: Math.random, mood: fit, hidden,
+    const r = arrangeShuffle(result.items, { playingKey, heard: heardNow(), order: shuffleOrderRef.current, reshuffle, rand: Math.random, mood: fit, hidden,
       ready: (x) => canPlayHere(x.playback) && (!stepReady || stepReady(x.track)) });
     shuffleOrderRef.current = r.order;
     if (r.items !== result.items) setResult((prev) => (prev && prev.items === result.items ? { ...prev, items: r.items } : prev));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [discoverShuffle, result?.items, playingKey, shuffleEpoch, readySignature, hidden]);
+  }, [discoverShuffle, result?.items, playingKey, shuffleEpoch, readySignature, hidden, heardOnRecord]);
   /**
    * QUEUE-ADD-001: the search row's add button puts a song into what the listener is listening to: the
    * saved list being played from, the saved list in the queue (whose songs are starting songs, so the
@@ -818,34 +856,44 @@ export function App() {
   const addTarget = addTargetOf(playingContext, queueList, lists);
   const addLabel = addTarget.kind === 'queue' ? 'Now playing queue' : `\u201c${addTarget.name}\u201d`;
   const addedKeys = new Set(addTarget.kind === 'queue' ? queueRows.map((x) => x.track.key) : (lists.find((l) => l.id === addTarget.id)?.items ?? []).map((i) => i.key));
+  /**
+   * SEARCH-DBL-NEXT-001 (owner, 2026-11-21): "double tapping or double clicking a song in search should add it to the
+   * discover / now playing queue, and add that new song right after the song currently playing". The playing song
+   * keeps playing and stays in the player; the + button with the queue chosen does the same.
+   */
+  const queueNext = (t: Track) => {
+    const row = addedRow(t);
+    const after = playingKey && queueRows.some((x) => x.track.key === playingKey) ? playingKey : null;
+    setResult((prev) => {
+      if (!prev) return prev;
+      const next = insertAfter(prev.items, row, after);
+      return { ...prev, items: next, count: next.length };
+    });
+    api.queueAdd(row, after).then((r) => setResult((prev) => prev ?? r), (e: Error) => flash(`Could not add that: ${e.message}`));
+    flash(`Added \u201c${t.title}\u201d to your now playing queue.`);
+    // QUEUE-SEED-001: a song put in the queue by hand is a starting song too, so one added song is
+    // enough to discover from — the listener should not have to find a second control for that.
+    if (!seeds.some((x) => x.key === t.key)) {
+      const next = [...seeds, { ...t, emphasis: t.emphasis ?? 1 }];
+      setSeeds(next);
+      void (async () => {
+        try {
+          await api.putSeeds(next);
+          // A discovery already under way is reading these same seeds; let it finish.
+          if (!running) await run(true);
+        } catch (e) {
+          flash(`Could not start from that song: ${(e as Error).message}`);
+        }
+      })();
+    }
+  };
+
   const addToListening = (t: Track) => {
     if (addTarget.kind === 'queue') {
-      const row = addedRow(t);
-      const after = playingKey && queueRows.some((x) => x.track.key === playingKey) ? playingKey : null;
-      setResult((prev) => {
-        if (!prev) return prev;
-        const next = insertAfter(prev.items, row, after);
-        return { ...prev, items: next, count: next.length };
-      });
-      api.queueAdd(row, after).then((r) => setResult((prev) => prev ?? r), (e: Error) => flash(`Could not add that: ${e.message}`));
-      flash(`Added \u201c${t.title}\u201d to your now playing queue.`);
-      // QUEUE-SEED-001: a song put in the queue by hand is a starting song too, so one added song is
-      // enough to discover from — the listener should not have to find a second control for that.
-      if (!seeds.some((x) => x.key === t.key)) {
-        const next = [...seeds, { ...t, emphasis: t.emphasis ?? 1 }];
-        setSeeds(next);
-        void (async () => {
-          try {
-            await api.putSeeds(next);
-            // A discovery already under way is reading these same seeds; let it finish.
-            if (!running) await run(true);
-          } catch (e) {
-            flash(`Could not start from that song: ${(e as Error).message}`);
-          }
-        })();
-      }
+      queueNext(t);
       return;
     }
+
     const target = addTarget;
     void (async () => {
       try {
@@ -874,13 +922,14 @@ export function App() {
     // for a streaming preview here silently dropped preview-less songs out of the queue, so they
     // were never cued and never blended into.
     const playable = (x: RecItem) => canPlayHere(x.playback);
-    const rest = shuffle ? activeItems.filter((x) => x.track.key !== playingKey && !heardRef.current.has(x.track.key) && !hidden.has(x.track.key)) : activeItems.slice(i + 1).filter(x => !hidden.has(x.track.key));
+    const heard = heardNow();
+    const rest = shuffle ? activeItems.filter((x) => x.track.key !== playingKey && !heard.has(x.track.key) && !hidden.has(x.track.key)) : activeItems.slice(i + 1).filter(x => !hidden.has(x.track.key));
     const ordered = nextKey ? [...rest.filter((x) => x.track.key === nextKey), ...rest.filter((x) => x.track.key !== nextKey)] : rest;
     return ordered
       .filter(x => playable(x) && (!ready || ready(x.track)))
       .slice(0, 4)
       .map((x) => ({ key: x.track.key, title: x.track.title, artist: artistOf(x.track), artwork: x.track.artwork, preview: x.playback.preview, track: x.track }));
-  }, [activeItems, inQueue, playingKey, shuffle, hidden, nextKey, readySignature]);
+  }, [activeItems, inQueue, playingKey, shuffle, hidden, nextKey, readySignature, heardOnRecord]);
   // The four visible Up Next rows are NOT the download queue. Prepare every entry, even before Play.
   const cacheTracks = useMemo(() => preparationTracks(playing?.track ?? null, upNext.flatMap(x => x.track ? [x.track] : []),
     activeItems.filter(x => !hidden.has(x.track.key)).map(x => x.track),
@@ -895,8 +944,12 @@ export function App() {
   const queueSongCount = useMemo(() => new Set(queueTracks.map((t) => t.key)).size, [queueTracks]);
   // TASTE-SPIN-001: the taste line's arrow turns while a song plays.
   const [songPlaying, setSongPlaying] = useState(false);
-  const keptKeys = useKeptKeys(cacheTracks);
-  const cardCache = useCardCache(cacheTracks, keptKeys);
+  // ROW-DL-KEPT-001: asked again each time one of the listener's own downloads finishes.
+  const keptKeys = useKeptKeys(cacheTracks, dls.jobs.filter((j) => j.state === 'done').length);
+  const queueCache = useCardCache(cacheTracks, keptKeys);
+  // PLAY-LIVE-001: each row's state is the queue cache's word with the song's own Download job folded in, so a Play
+  // button turns blue (and its ring fills) as the download runs and finishes, with nothing else asked of the listener.
+  const cardCache = useMemo(() => (key: string) => withJob(queueCache(key), dls.jobOf(key)), [queueCache, dls.jobOf]);
 
   // MEDIA-NATIVE-001: mirror the player onto the Android native MediaSession / Android Auto. Every
   // call is a no-op outside the Android app, so these run unconditionally but only act in the shell.
@@ -904,6 +957,11 @@ export function App() {
   const nativeReady = (t: Track) => (ready ? ready(t) : false);
   /** The ready song as the native side needs it, including the exact file the native engine plays. */
   const nativeSong = (t: Track) => { const r = nativeReady(t); return songFromTrack(t, r, r ? queueAudio.readyUrl(t) : null); };
+  /** SHUFFLE-ONCE-001: a song of the list playing, marked when the queue's shuffle counts it as heard. */
+  const queueSong = (t: Track) => {
+    const s = nativeSong(t);
+    return discoverShuffle && t.key !== playingKey && heardNow().has(t.key) ? { ...s, heard: true } : s;
+  };
   /** A song chosen by its id — a car row (playlist-scoped or not), or the song the engine is playing. */
   /** CAR-RADIO-CONTROLS-001: the song identified on the radio, for a star or playlist pick made in the car. */
   const onAirSong = (id: string): Track | undefined => { const r = radioSession.get(); return r.identified && r.track?.key === id && r.track.provider !== 'radio' ? r.track : undefined; };
@@ -983,20 +1041,42 @@ export function App() {
       feedback: (id, kind, carTrack) => {
         const t = trackById(id) ?? (playing?.track.key === id ? playing.track : undefined) ?? onAirSong(id) ?? carTrack;
         if (!t) return;
-        learnFeedback(t, kind).catch((e) => flash(`Could not save that: ${(e as Error).message}`));
+        learnFeedback(t, kind, { fromCar: true }).catch((e) => flash(`Could not save that: ${(e as Error).message}`));
+      },
+      // CAR-X-001 (owner, 2026-11-24): "ensure the X button works on android auto". The car's X: the song it is playing
+      // leaves the queue at once and the next one plays, wherever the song sits (the page may not know it is playing).
+      leave: (id) => {
+        const k = trackById(id)?.key ?? id;
+        setHidden((h) => new Set(h).add(k));
+        leaveSong(k);
+      },
+      // ARTIST-FAV-CAR-001: the car's Star the artist button stars every artist of the song (the active algorithm's list).
+      starArtists: async (id, credit, carTrack) => {
+        const t = trackById(id) ?? (playing?.track.key === id ? playing.track : undefined) ?? onAirSong(id) ?? carTrack;
+        // CAR-ANSWERABLE-001: only the names that really saved go back to the car.
+        const saved: string[] = [];
+        for (const name of artistNamesOf(t, credit)) {
+          if (await favArtistsStore.add({ name }).then(() => true).catch(() => false)) saved.push(name);
+        }
+        return saved;
       },
       // CAR-CONTROLS-001: a playlist picked in the car after a row's star, saved like the app's own add.
       playlistAdd: (id, listId, carTrack) => {
         const t = trackById(id) ?? (playing?.track.key === id ? playing.track : undefined) ?? onAirSong(id) ?? carTrack;
-        const list = lists.find((l) => l.id === listId && !l.album);
-        if (!t || !list) return;
+        // CAR-HEART-ALWAYS-001: with no playlist the car offers to start one; it is made once and found by name after.
+        const starting = listId === CAR_NEW_LIST;
+        const list = lists.find((l) => !l.album && (starting ? l.name === CAR_NEW_LIST_NAME : l.id === listId));
+        if (!t || (!list && !starting)) return;
+        const name = list?.name ?? CAR_NEW_LIST_NAME;
         void (async () => {
           try {
             await api.feedback('save', t, { event_id: newEventId('save', t.key) });
-            const r = await api.playlistEdit('add', { ids: [list.id], key: t.key, tracks: [t] });
+            const r = list
+              ? await api.playlistEdit('add', { ids: [list.id], key: t.key, tracks: [t] })
+              : await api.playlistEdit('create', { name, key: t.key, tracks: [t] });
             setLists(r.lists);
           } catch (e) {
-            flash(`Could not add that to ${list.name}: ${(e as Error).message}`);
+            flash(`Could not add that to ${name}: ${(e as Error).message}`);
           }
         })();
       },
@@ -1046,17 +1126,20 @@ export function App() {
       canPrev: Boolean(prevStep),
       shuffle,
       repeat: repeat === 'one' ? 1 : repeat === 'once' ? 3 : repeat === 'twice' ? 4 : 0,
-      queue: activeItems.map((x) => nativeSong(x.track)),
+      queue: activeItems.map((x) => queueSong(x.track)),
       queueIndex: idx,
       liked: playingLiked,
       disliked: playingDisliked,
+      // SHUFFLE-ONCE-001: the phone's engine, playing on alone (the car, the screen off), keeps the rule too.
+      once: discoverShuffle,
     });
-  }, [playing, activeItems, playingKey, Boolean(nextStep), Boolean(prevStep), shuffle, repeat, readySignature, playingLiked, playingDisliked]);
+  }, [playing, activeItems, playingKey, Boolean(nextStep), Boolean(prevStep), shuffle, repeat, readySignature, playingLiked, playingDisliked, discoverShuffle, heardOnRecord]);
   useEffect(() => {
     if (!mediaNativeAvailable()) return;
     pushMediaLibrary(
-      activeItems.map((x) => nativeSong(x.track)),
-      lists.map((l) => ({
+      activeItems.map((x) => queueSong(x.track)),
+      // PLAYLIST-KEEP-001: before the lists have been read the car keeps the playlists it already has.
+      !listsKnown ? null : lists.map((l) => ({
         id: l.id, title: l.name, songs: savedTracks(saved, lists, l.id).map((t) => nativeSong(t)),
         // ALBUM-SAVE-001: saved albums are listed under Albums in the car.
         ...(l.album ? { album: true, artist: l.album.artist, artwork: l.album.artwork } : {}),
@@ -1064,7 +1147,7 @@ export function App() {
     );
     // NATIVE-COLD-STATE-001: their original Tracks too, so a cold car start acquires these exact songs.
     pushMediaTracks([...activeItems.map((x) => x.track), ...lists.flatMap((l) => savedTracks(saved, lists, l.id))]);
-  }, [activeItems, lists, saved, readySignature]);
+  }, [activeItems, lists, listsKnown, saved, readySignature, discoverShuffle, heardOnRecord, playingKey]);
 
   // A skip or a full listen is recorded, then the songs still to come are ranked again with it.
   // Only the newest answer is applied, so two quick skips cannot show the older order.
@@ -1074,6 +1157,8 @@ export function App() {
 
   const onListen = (kind: 'complete' | 'skip' | 'replay', t: Track, listened: number, meta: ListenTelemetry) => {
     const sample = Boolean(result?.sample);
+    // SHUFFLE-ONCE-001: heard now is heard for good, whichever list it was heard from.
+    if ((kind === 'complete' || kind === 'skip') && !heardOnRecord.has(t.key)) setHeardOnRecord((h) => new Set(h).add(t.key));
     const seq = ++rerankSeq.current;
     const eventId = `${kind}:${t.key.slice(0, 40)}:${meta.instance}`.slice(0, 80);
     void api
@@ -1089,7 +1174,8 @@ export function App() {
       .then(() => {
         // Learning shows even with no queue to re-rank: the Your sound card reads the same taste.
         if (sample || !result) void refreshTaste();
-        return sample || !result ? null : api.rerank([...playedRef.current]);
+        // QUEUE-DATA-FLOW-001: a re-rank that fails must not cost the queue its top-up further down this chain.
+        return sample || !result ? null : api.rerank([...playedRef.current]).catch(() => null);
       })
       .then((r) => {
         nudgeMood();
@@ -1181,8 +1267,27 @@ export function App() {
   // ---------------------------------------------------------------- feedback
   const feedbackPending = useRef(new Set<string>());
 
+  /**
+   * REMOVE-X-001 / CAR-X-001: song [k] is taken out while it plays. The next one plays: from the song's own place (it
+   * must still be in the list to have one; it is never the answer), else the first one ready in the list; with none,
+   * the song stops. Used by the app's X and by the car's X (which names the song the car is playing).
+   */
+  const leaveSong = (k: string) => {
+    const gone = new Set(hidden).add(k);
+    const fromHere = stepQueue(activeItems, activeItems.some((x) => x.track.key === k) ? k : null, 1, hidden, queueOpts);
+    const after = (fromHere && fromHere.item.track.key !== k ? fromHere : null)
+      ?? stepQueue(activeItems.filter((x) => x.track.key !== k), null, 1, gone, queueOpts);
+    if (after && (!stepReady || stepReady(after.item.track))) { play(after.item, { newRound: after.wrapped, keepList: true }); return; }
+    // CAR-X-001: nothing downloaded yet to move to: the next song in the list still plays (it fetches, then starts), so
+    // the X never leaves the removed song playing. Only with no other song at all does it stop.
+    const fetchable = stepQueue(activeItems, activeItems.some((x) => x.track.key === k) ? k : null, 1, gone, { ...queueOpts, ready: undefined })
+      ?? stepQueue(activeItems.filter((x) => x.track.key !== k), null, 1, gone, { ...queueOpts, ready: undefined });
+    if (fetchable && fetchable.item.track.key !== k) { play(fetchable.item, { newRound: fetchable.wrapped, keepList: true }); return; }
+    startTokenRef.current++; engineSend({ op: 'pause' }); setPlaying(null);
+  };
+
   /** Explicit judgements teach the same live ranker as listening, without another provider run. */
-  const learnFeedback = async (track: Track, kind: FeedbackKind) => {
+  const learnFeedback = async (track: Track, kind: FeedbackKind, o?: { fromCar?: boolean }) => {
     const k = track.key;
     if (feedbackPending.current.has(k)) return;
     feedbackPending.current.add(k);
@@ -1200,7 +1305,13 @@ export function App() {
       });
       // REMOVE-QUIET-001 (owner, 2026-11-19): "get rid of the message when removing a song" — the row going
       // away is the answer; no notice follows it.
-      if (kind === 'hide') setHidden((h) => new Set(h).add(k));
+      // REMOVE-X-001 (owner, 2026-11-24: "removing songs / the x button doesnt work"): a dislike takes the row out
+      // at once and for this list, played or not. The engine keeps songs already played in its answer (the history is
+      // protected), so leaving the removal to the re-rank kept every heard song in the queue, painted red.
+      if (kind === 'hide' || kind === 'dislike') setHidden((h) => new Set(h).add(k));
+      // The song playing is the one taken out: the next one plays now. The car moves on by itself (CAR-X-001: its
+      // service asks with a `leave` command), so a dislike from the car never moves the song twice.
+      if (kind === 'dislike' && !o?.fromCar && playing?.track.key === k) leaveSong(k);
       if (kind === 'hide' || kind === 'dislike') {
         // REMOVE-FOREVER-001: the app's own downloaded copy goes too (a copy kept in the Music folder stays).
         const cachedAt = downloadsAvailable() ? queueAudio.sourceHint(track) : null;
@@ -1240,10 +1351,32 @@ export function App() {
   };
 
   useEffect(() => {
-    if (tab === 'saved') api.saved().then((r) => setSaved(r.items), () => setSaved([]));
+    // PLAYLIST-KEEP-001 (owner, 2026-11-23: "the playlist dont load or save the music"): a read that fails (the
+    // engine busy at start, a slow answer) is tried again. It used to be shown as an empty Saved and no lists.
+    if (tab === 'saved') api.saved().then((r) => setSaved(r.items), () => setSaved((prev) => prev ?? []));
     // The lists are needed on Discover too, for the menu the like button opens.
-    if (tab === 'saved' || tab === 'discover') api.playlists().then((r) => setLists(r.lists), () => setLists([]));
+    if (tab !== 'saved' && tab !== 'discover') return;
+    return keepTrying(() => api.playlists(), (r) => setLists(r.lists));
   }, [tab, flags]);
+
+  // CAR-SAVE-HIDDEN-001 (owner, 2026-11-23): while this screen was away the car may have starred songs and added
+  // them to playlists; the playback service's engine saves those. Back in front, read the stars again. The lists
+  // and Saved follow them (the effect above), so the phone shows what the car did and never hands the car an
+  // older set of playlists.
+  useEffect(() => {
+    const onShow = () => {
+      if (document.visibilityState !== 'visible') return;
+      api.feedbackState().then((fb) => {
+        const f: Record<string, FeedbackFlags> = {};
+        for (const [k, v] of Object.entries(fb.state)) f[k] = { like: v.like, dislike: v.dislike, hide: v.hide, save: v.save };
+        setFlags(f);
+        setHeardOnRecord(unionHeard(heardIn(fb.state), startedOnRecord()));
+        if (fb.taste) setTaste(fb.taste);
+      }, () => undefined);
+    };
+    document.addEventListener('visibilitychange', onShow);
+    return () => document.removeEventListener('visibilitychange', onShow);
+  }, []);
 
   /**
    * Like or unlike a song that is not in a recommendation row — from the search list, say
@@ -1432,6 +1565,7 @@ export function App() {
                 onPreview={playFromSearch}
                 onOpenSettings={() => setTab('settings')}
                 onQueueAdd={addToListening}
+                onQueueNext={queueNext}
                 addLabel={addLabel}
                 addedKeys={addedKeys}
                 onDownload={dls.on ? (t) => void dls.downloadTrack(t) : undefined}
@@ -1466,19 +1600,21 @@ export function App() {
                 </label>
                 <p className="go__hint go__level" aria-live="polite">{adventureLabel(adventurous)}</p>
                 {/* The limit itself lives in Settings, where it also governs listening top-ups. */}
-                <p className="go__hint">
+                {/* DISCOVER-QUIET-001 (owner, 2026-11-22): "get rid of labels under a mix of familar and new and the label under
+                    prefer new releases button but keep the spacing". The lines keep their room and print nothing. */}
+                <p className="go__hint go__gone" aria-hidden="true">
                   Up to {queueSize} new {queueSize === 1 ? 'song' : 'songs'} per discovery — change it in Settings
                 </p>
                 <label className="go__fresh">
                   <input type="checkbox" checked={fresh} onChange={(e) => patchSettings({ fresh: e.target.checked })} />
                   <span>Prefer new releases</span>
-                  <span className="go__freshnote">songs from the last 60 days, when the source gives a date</span>
+                  <span className="go__freshnote go__gone" aria-hidden="true">songs from the last 60 days, when the source gives a date</span>
                 </label>
               </div>
               <div className="go__row">
                 {/* DISCOVER-TIDY-001 (owner): one row, Find my next favorite 75% and Customize discovery 25% as an icon. */}
                 <div className="go__pair">
-                  <button className="push push--default push--big" type="button" disabled={(!seeds.length && !customSet) || running || !loaded} aria-describedby="go-why" onClick={findNext}>
+                  <button className="push push--default push--big" type="button" disabled={running || !loaded} aria-describedby="go-why" onClick={findNext}>
                     {running ? 'Finding…' : 'Find my next favorite'}
                   </button>
                   <button className="push push--big go__custom" type="button" disabled={!loaded} aria-haspopup="dialog" aria-expanded={customOpen}
@@ -1492,7 +1628,8 @@ export function App() {
                   </button>
                 )}
                 <span id="go-why" className="go__why" aria-live="polite">
-                  {customStatus.text && (customStatus.running || !customOpen) ? customStatus.text : running ? job?.progress : ''}
+                  {/* NEXT-FAV-COLD-001: when a run had no starting song, the line under the button says what it read. */}
+                  {customStatus.text && (customStatus.running || !customOpen) ? customStatus.text : running ? job?.progress : result?.started_from ?? ''}
                 </span>
                 {customStatus.running && !customOpen && (
                   <button className="push push--big" type="button" onClick={stopCustom}>Stop</button>
@@ -1614,6 +1751,8 @@ export function App() {
                   {(result.count - (result.items ?? []).filter(x => expired.has(x.track.key)).length) < result.asked && !sample && (
                     <p className="note">
                       Found {result.count - (result.items ?? []).filter(x => expired.has(x.track.key)).length} songs worth suggesting{result.empty_reason ? ` — ${result.empty_reason}` : '.'} Airwave does not pad the list.
+                      {/* NEXT-FAV-COLD-001: a run with no starting song says what it read instead. */}
+                      {result.started_from ? ` ${result.started_from}` : ''}
                     </p>
                   )}
                   {/* SRC-WARN-001: a quiet provider is a status detail, not news for the listener.
@@ -1703,7 +1842,7 @@ export function App() {
                   <span className="empty__art" aria-hidden="true">
                     <Glyph name="note" size={28} />
                   </span>
-                  <p>Search for a song you love, press Add, then find your next favorite.</p>
+                  <p>Press “Find my next favorite” and this reads your starred artists, your listening and your sound. Or search for a song you love and press Add to start from it.</p>
                 </div>
               )}
             </section>

@@ -154,7 +154,7 @@ class EnginePlayer(
   /** A queue entry: the song, and the id it was chosen under (a playlist-scoped car id keeps its context). */
   data class Entry(val song: MediaHub.Song, val mediaId: String = song.id)
 
-  private val queue = PlayQueue<Entry>(keyOf = { it.mediaId }, isPlayable = { it.song.source != null && it.song.ready })
+  private val queue = PlayQueue<Entry>(keyOf = { it.mediaId }, isPlayable = { it.song.source != null && it.song.ready }, heardBefore = { it.song.heard }, artistOf = { it.song.artist })
   private val repeatSync = RepeatSync()
   private var repeatFromPage = false
   private var playWhenReady = false
@@ -239,7 +239,7 @@ class EnginePlayer(
    * the newest [rev] the page had seen; a load from before a change the service made is stale.
    */
   fun pageLoad(song: MediaHub.Song, mediaId: String?, positionMs: Long, play: Boolean, pageRev: Int) {
-    if (radioLive) { radioLive = false; forgetRadioItem(); com.nowplaying.discovery.RadioNative.stop(); com.nowplaying.discovery.RadioNative.shuffle = false }
+    leaveRadio()
     val id = mediaId ?: song.id
     val current = queue.current
     Log.i(TAG, "page load ${song.id.take(60)} link=${song.source != null} play=$play rev=$pageRev/$rev")
@@ -262,6 +262,12 @@ class EnginePlayer(
     playWhenReady = play
     holdWake(play)
     loadCurrent(positionMs.coerceAtLeast(0), chosen = true)
+  }
+
+  /** Ends a live broadcast (the song player takes over). Nothing when no radio plays. */
+  private fun leaveRadio() {
+    if (!radioLive) return
+    radioLive = false; forgetRadioItem(); com.nowplaying.discovery.RadioNative.stop(); com.nowplaying.discovery.RadioNative.shuffle = false
   }
 
   /** What the page will play after the current song; null for nothing (end of list, repeat-one). */
@@ -305,7 +311,7 @@ class EnginePlayer(
    * as an extra entry if it is not in the list (a search result) — and a chosen song that was
    * waiting for its file starts once the file is here.
    */
-  fun libraryChanged(list: List<MediaHub.Song>, shuffle: Boolean, repeat: Int) {
+  fun libraryChanged(list: List<MediaHub.Song>, shuffle: Boolean, repeat: Int, once: Boolean = false) {
     if (radioLive) return
     if (pageLive && list.isNotEmpty()) {
       val current = queue.current
@@ -317,6 +323,7 @@ class EnginePlayer(
         else -> queue.set(entries + current, entries.size)
       }
       queue.shuffle = shuffle
+      queue.playsOnce = once
       val chosen = repeatSync.fromPage(repeat)
       if (chosen != null) { if (chosen != repeatMode()) applyRepeat(chosen, fromPage = true) }
       else resendRepeatToPage() // it still shows a value the service has since changed: say so again
@@ -480,6 +487,11 @@ class EnginePlayer(
     if (chosen != null && chosen == queue.current?.mediaId && mediaItems[start].requestMetadata.extras?.getBoolean(KEEP_PLAYING) == true) return Futures.immediateVoidFuture()
     // Radio is native even with a live page: never send station ids through music lookup/playId.
     if (chosen != null && RadioCatalog.stationId(chosen) != null) return RadioCatalog.play(context, chosen)
+    // CAR-RADIO-TO-QUEUE-001 (owner, 2026-11-22): "on android auto playing radio and switching to now playing queue just
+    // takes the user back to the radio queue". A song chosen in the car while the radio plays ends the broadcast first;
+    // before, the native path loaded the song under a still-live radio session, so the car stayed on the station.
+    // A playlist pick (KEEP_PLAYING) changes nothing that plays, the radio included.
+    if (chosen != null && mediaItems[start].requestMetadata.extras?.getBoolean(KEEP_PLAYING) != true) leaveRadio()
     if (pageLive && chosen != null) {
       // The page knows the playlist context, the shuffle round and how to fetch a song it lacks.
       page?.command(JSONObject().put("type", "playId").put("id", chosen))
@@ -710,6 +722,35 @@ class EnginePlayer(
     log(if (forward) "next" else "prev", heard)
     loadCurrent(0, chosen = false)
   }
+
+  /**
+   * CAR-X-001 (owner, 2026-11-24: "ensure the X button works on android auto"): the car's X took song [id] out while it
+   * plays. With the phone page in charge the page drops it and plays the next one; otherwise the queue does
+   * ([PlayQueue.leave], skipping songs [avoid] turns down). Media3's own Next was not enough: it does nothing for the
+   * last song of the list, under shuffle too. Returns false when nothing can follow: the song is paused instead.
+   */
+  fun leaveSong(id: String, avoid: (MediaHub.Song) -> Boolean): Boolean {
+    val cur = queue.current ?: return false
+    if (cur.song.id != id && cur.mediaId != id) return false
+    if (pageLive) { page?.command(JSONObject().put("type", "leave").put("id", cur.song.id)); Log.i(TAG, "leave ${id.take(60)}: page"); return true }
+    val heard = heardNow()
+    val size = queue.items.size
+    if (queue.leave(cur.mediaId, avoid = { avoid(it.song) }, canFetch = { it.song.source != null }) == null) {
+      Log.i(TAG, "leave ${id.take(60)}: nothing to follow in $size (heard ${queue.items.count { it.song.heard }}, ready ${queue.items.count { it.song.ready }}, once=${queue.playsOnce})")
+      changePlayWhenReady(false)
+      return false
+    }
+    Log.i(TAG, "leave ${id.take(60)}: now ${queue.current?.song?.id?.take(60)} (ready=${queue.current?.song?.ready})")
+    cue = null
+    cueFor = null
+    nativeChange()
+    log("next", heard)
+    loadCurrent(0, chosen = queue.current?.song?.ready != true) // a song still to fetch waits for its file
+    return true
+  }
+
+  /** Tests only: start the next test from an empty queue (CAR-X-001 tests take songs out of it). */
+  internal fun forgetQueueForTests() { queue.set(emptyList(), -1); invalidateState() }
 
   /** Make [song] current: in the queue if it is there, appended otherwise (a cue from outside the list). */
   private fun moveTo(song: MediaHub.Song): Boolean {

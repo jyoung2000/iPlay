@@ -14,6 +14,9 @@ import { PROVIDER_LABEL, QUEUE_SIZE_MAX, QUEUE_SIZE_MIN, classNames, fmtBytes } 
 import './discovery-settings.css';
 import { SIMILAR_DEFAULT, SIMILAR_MAX, SIMILAR_MIN } from './engine/similar-sound';
 import { NumberField } from './NumberField';
+import { FavArtistsSettings } from './FavArtists';
+import { VolumeSetting } from './VolumeSetting';
+import { CarKeep } from './CarKeep';
 
 const CAPS: [string, string][] = [
   ['search', 'Search'],
@@ -185,6 +188,8 @@ export function SettingsView({ settings, onSettings, onReset, onResetTaste, onFo
     <div className="settings">
       <section className="card" aria-labelledby="set-h">
         <h2 id="set-h">Settings</h2>
+        {/* VOLUME-SETTINGS-001 (owner, 2026-11-22): the app's volume, moved here from the player's controls. */}
+        <VolumeSetting />
         <section className="discovery-settings" aria-labelledby="discovery-h">
           <h3 id="discovery-h">Discovery</h3>
           <div className="discovery-settings__heading">
@@ -254,6 +259,7 @@ export function SettingsView({ settings, onSettings, onReset, onResetTaste, onFo
             playlists keep their order unless shuffle is on. The song playing and songs you added yourself never move.
           </p>
         </section>
+        <FavArtistsSettings />
         <section className="discovery-settings" aria-labelledby="similar-h">
           <h3 id="similar-h">Similar sound</h3>
           <div className="discovery-settings__heading">
@@ -464,6 +470,9 @@ export function SettingsView({ settings, onSettings, onReset, onResetTaste, onFo
 
       {/* FOLDER-IMPORT-001: the Downloads section — download queue plus local folder imports. */}
       {downloads && <DownloadsSettings downloads={downloads} />}
+
+      {/* CAR-KEEP-001: Android only; renders nothing where the phone bridge is absent. */}
+      <CarKeep />
 
       <section className="card" aria-labelledby="src-h">
         <div className="card__head">

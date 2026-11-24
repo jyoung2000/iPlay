@@ -2335,6 +2335,25 @@ a.push {
   flex-wrap: wrap;
   gap: 4px;
 }
+/* PROFILE-ALIGN-001 (owner, 2026-11-22): "ensure the numbers and ui on the profile tab artist, albums, and songs
+   sections are aligned properly". The three score tables share one fixed column plan, so a long song title can no
+   longer widen the Songs table past its card: every bar starts and every number ends at the same place in all three. */
+.ptable--scores {
+  table-layout: fixed;
+  width: 100%;
+}
+.ptable--scores tbody th {
+  width: auto;
+}
+.ptable--scores .ptable__bar {
+  width: 46%;
+}
+.ptable--scores tbody th .ptable__facts {
+  margin-top: 3px;
+}
+.ptable--scores tbody th .fact {
+  margin-left: 0;
+}
 .ptable .num {
   display: inline-block;
   min-width: 3.2em;
@@ -2445,6 +2464,9 @@ a.push {
 @media (max-width: 480px) {
   /* On a phone the bar column takes the room the other columns leave, so a bar stays readable. */
   .ptable__bar {
+    width: 52%;
+  }
+  .ptable--scores .ptable__bar {
     width: 52%;
   }
   .pcell {
@@ -3783,12 +3805,13 @@ html {
    The existing check and accessible readiness text remain; colour is an additional cue. */
 .rec__actions .iconbtn.playbtn[data-ready='true'] {
   /* ROW-PLAY-001: the same light blue fill as every other list (row-play.css); the old #e6effb was too faint. */
-  background: #bcd8ff;
+  /* PLAY-LIVE-001 (owner, 2026-11-21): solid blue with a white arrow. */
+  background: var(--accent);
   /* PLAY-DISC-001: the shorthand above resets the clip to the border box, which painted the fill into
      the transparent 44px target borders: a 36 x 44 pill whose blue sat off the ring's circle. */
   background-clip: content-box;
-  color: var(--accent);
-  box-shadow: inset 0 0 0 1px #8fbcf5;
+  color: #fff;
+  box-shadow: none;
 }
 .rec__dl[data-dl='failed'] .rec__dl-rail,
 .rec__dl[data-dl='blocked'] .rec__dl-rail { width: 100%; background: var(--danger); opacity: 0.5; clip-path: none; }
@@ -4071,6 +4094,8 @@ html {
   pointer-events: auto;
 }
 /* The folder button beside it is a full 44px target at every width (the desktop icon button is 30px). */
+/* DISCOVER-QUIET-001: a line that keeps its room and prints nothing. */
+.go__gone { visibility: hidden; }
 .list-save__folder {
   min-width: 44px;
   min-height: 44px;

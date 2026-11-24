@@ -1,0 +1,42 @@
+/* ARTIST-FAV-001: the artist page's star and the Settings list of starred artists. */
+/* ARTIST-STAR-LOOK-001 (owner, 2026-11-21): "the star on the artist page should be black and white until tapped then
+   gets blue and white filled tapped". The same star sits on an artist in the search results. */
+.artist__star { min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; }
+.push.artist__star { padding: 0 14px; }
+.artist__star.artist__star[aria-pressed='false'] { background: #fff; color: var(--ink); border-color: transparent; box-shadow: inset 0 0 0 1px var(--hair); }
+.artist__star.artist__star[aria-pressed='true'] { background: var(--accent); color: #fff; border-color: transparent; box-shadow: none; }
+.iconbtn.album__save { width: 44px; height: 44px; padding: 0; flex: 0 0 44px; }
+.iconbtn.artist__star--row { width: 44px; height: 44px; padding: 0; flex: 0 0 44px; align-self: center; margin-right: 6px; }
+.artists ul.tracks > li.track.album-row { display: flex; flex-wrap: nowrap; align-items: center; }
+.artists ul.tracks > li.track.album-row > .album-row__open { flex: 1 1 0; min-width: 0; width: auto; }
+.fav-artists__list { list-style: none; margin: 8px 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.fav-artists__row {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 4px 0 10px;
+  border: 1px solid var(--line, rgba(0, 0, 0, .14)); border-radius: 999px;
+}
+.fav-artists__mark { color: var(--accent); flex-shrink: 0; }
+.fav-artists__name { overflow-wrap: anywhere; }
+.btn.fav-artists__remove { min-width: 32px; min-height: 32px; padding: 0; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; }
+.search__form.fav-artists__add { margin-top: 8px; }
+.fav-artists__found { margin-top: 8px; }
+.fav-artists__found > li.track.album-row { display: flex; flex-wrap: nowrap; align-items: center; gap: 10px; }
+.fav-artists__found .track__text { flex: 1 1 0; min-width: 0; }
+@media (hover: hover) {
+  .artist__star.artist__star[aria-pressed='false']:hover:not(:disabled) { background: #f4f3ef; }
+  .artist__star.artist__star[aria-pressed='true']:hover:not(:disabled) { filter: brightness(1.1); }
+  .btn.fav-artists__remove:hover { color: var(--accent); }
+}
+.iconbtn.list-save__go { width: 44px; height: 44px; padding: 0; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; background: #fff; box-shadow: inset 0 0 0 1px var(--hair); }
+.iconbtn.list-save__go svg { fill: var(--ink); }
+/* ACTIVE-ICON-001 (owner, 2026-11-22): "make the active icons white on windows and on android make the active icon the
+   same color blue as the active text". The tab's glyph takes the tab's own text colour when it is the active tab. */
+.side__item.is-on svg { fill: currentColor; }
+/* PLAYER-ARTIST-HEART-001: the artist button is distinct from the song's own heart. */
+.artist-heart { display:inline-grid; place-items:center; flex:0 0 44px; width:44px; min-width:44px; height:44px; min-height:44px; padding:0; border:0; border-radius:999px; color:var(--ink); background:transparent; cursor:pointer; }
+.artist-heart__disc { display:grid; place-items:center; width:36px; height:36px; border-radius:999px; }
+.artist-heart[aria-pressed='true'] .artist-heart__disc { background:var(--accent); color:#fff; }
+.artist-heart:disabled { opacity:.45; cursor:default; }
+@media (hover:hover) {
+ .artist-heart:hover:not(:disabled) .artist-heart__disc { background:#f4f3ef; }
+ .artist-heart[aria-pressed='true']:hover:not(:disabled) .artist-heart__disc { background:#1a62bb; }
+}

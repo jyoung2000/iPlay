@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Glyph } from '@now-playing/aqua-ui/icons';
 import { OpenLinkCycle } from './OpenLinkCycle';
 import { usePlayerSwipe } from './usePlayerSwipe';
@@ -13,8 +13,9 @@ import './player-upcoming.css';
 import './player-inline.css';
 import './player-big.css';
 import './dock-centre.css';
-import { Volume } from './Volume';
-import { VOLUME_MAX, elementVolume, readVolume } from './engine/volume-boost';
+import { PlayingArtistHeart } from './FavArtists';
+import { volumeStore } from './volume-store';
+import { VOLUME_MAX, elementVolume } from './engine/volume-boost';
 import { PlayerActions, type TrackActionProps } from './PlayerActions';
 import { Wheel } from './Wheel';
 import { loadYouTube, youtubeEmbedUrl, type YTPlayer } from './youtube';
@@ -24,13 +25,14 @@ import { rescueSource } from './engine/rescue';
 import { pickStream } from './engine/stream-pick';
 import { startHls } from './engine/hls';
 import { downloadsAvailable, playbackActive } from './engine/downloads';
-import { mediaNativeAvailable, pushMediaState, setMediaHandlers, songFromTrack } from './engine/media-native';
+import { artistNamesOf, mediaNativeAvailable, pushMediaState, setMediaHandlers, songFromTrack } from './engine/media-native';
 import { engineAvailable, engineRev, engineSend, engineSong, engineState, markEngineEvent, subscribeEngineState, type EngineState } from './engine/native-engine';
 import { queueAudio } from './engine/queue-audio';
+import { songSources } from './engine/song-sources';
 import { clearResume, writeResume } from './engine/resume';
 import { type DeckId } from './engine/audio-bus';
 import { PreviewMixer } from './engine/preview-mixer';
-import { COMPLETE_S, ListenMeter, PROVIDER_LABEL, SKIP_MAX_S, SKIP_MIN_S, artistOf, classNames, fmtDuration, isSilent, qualifiesCompletion, toggleMuteState, consumeRepeat, type RepeatMode } from './util';
+import { COMPLETE_S, ListenMeter, PROVIDER_LABEL, SKIP_MAX_S, SKIP_MIN_S, artistOf, classNames, fmtDuration, isSilent, qualifiesCompletion, consumeRepeat, type RepeatMode } from './util';
 
 export interface Playing {
   track: Track;
@@ -101,16 +103,6 @@ export interface ListenTelemetry {
   coverage: number;
 }
 
-const VOLUME_KEY = 'airwave.volume';
-
-function loadVolume(): { value: number; muted: boolean } {
-  try {
-    return readVolume(window.localStorage.getItem(VOLUME_KEY));
-  } catch {
-    return { value: 0.8, muted: false };
-  }
-}
-
 /** The YouTube video id a song plays from, when it already has one. */
 function knownVideoId(p: Playing | null): string | null {
   if (!p) return null;
@@ -146,6 +138,9 @@ type Mode = 'full' | 'local' | 'preview' | 'embed' | 'none';
  * A song with no YouTube Music version falls back to its 30-second Deezer preview in an <audio>
  * element. SoundCloud songs play in SoundCloud's widget, whose progress and volume Airwave cannot reach.
  */
+/** SHUFFLE-ONCE-001: how long a played-out song waits for a next one to carry on by itself. */
+const WAIT_NEXT_MS = 30 * 60_000;
+
 export function Player({ playing, upNext, docked, canPrev, canNext, shuffle, repeat, cacheGb = 1, actions, onShuffle, onRepeat, onRepeatConsumed, onPrev, onNext, onListen, onWheel, onSelect, onMenu, onPickUpNext, onOpenArtist, onPausedChange }: Props) {
   // Two decks, because a crossfade needs both songs audible at once: the outgoing song keeps
   // playing on its own element while the incoming one starts on the other. Both elements live for
@@ -177,10 +172,18 @@ export function Player({ playing, upNext, docked, canPrev, canNext, shuffle, rep
   const [dur, setDur] = useState(0);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [vol, setVol] = useState(loadVolume);
+  // VOLUME-SETTINGS-001: the level is the app's (set at the top of Settings), not this player's own.
+  const volValue = useSyncExternalStore(volumeStore.subscribe, volumeStore.level);
+  const volMuted = useSyncExternalStore(volumeStore.subscribe, volumeStore.muted);
+  const vol = useMemo(() => ({ value: volValue, muted: volMuted }), [volValue, volMuted]);
   const yt = useRef<YTPlayer | null>(null);
   const [ytReady, setYtReady] = useState(false);
   const ended = useRef(false);
+  /**
+   * SHUFFLE-ONCE-001 (owner, 2026-11-24): the song that played out with no next song to go to (every song in the queue
+   * heard, the next one still downloading or still being found). The player carries on by itself once there is one.
+   */
+  const waitingAfter = useRef<{ key: string; at: number } | null>(null);
   /** Playhead the resume point was last written at, so `timeupdate` does not write four times a second. */
   const savedAt = useRef(0);
   /**
@@ -197,7 +200,6 @@ export function Player({ playing, upNext, docked, canPrev, canNext, shuffle, rep
   const endsThisInstance = useRef(0);
   const volRef = useRef(vol);
   volRef.current = vol;
-  const lastLevel = useRef(vol.value);
   const repeatRef = useRef(repeat);
   repeatRef.current = repeat;
   const onEndRef = useRef<(engineHeard?: number) => void | Promise<void>>(() => undefined);
@@ -326,6 +328,8 @@ export function Player({ playing, upNext, docked, canPrev, canNext, shuffle, rep
     warmer().warm(nextTrackForCache);
   }, [nextTrackForCache]);
 
+  // RING-CLOSE-001: the song's row follows this very download, so its ring closes with it.
+  useEffect(() => { if (key && localSource) songSources.set(key, localSource); }, [key, localSource]);
   useEffect(() => {
     if (!canLocal) return;
     const protectedUrls = [localSource, upcomingSource].filter((u): u is string => Boolean(u));
@@ -340,6 +344,12 @@ export function Player({ playing, upNext, docked, canPrev, canNext, shuffle, rep
   }, [localSource, playing, canLocal]);
   const askingLocal = localSource !== null && !latched && (localStatus === 'unknown' || (localStatus === 'ready' && localSrc === null));
   const fetchingLocal = canLocal && localSource !== null && localStatus === 'running';
+  // RING-CLOSE-001: from the press, the song's row shows the player is finding or fetching it.
+  const gettingSong = canLocal && Boolean(key) && (lookingUp || askingLocal || fetchingLocal);
+  useEffect(() => {
+    songSources.fetching(gettingSong ? key : null);
+    return () => songSources.fetching(null);
+  }, [gettingSong, key]);
   const localError = localSource !== null && localStatus === 'missing' ? localLibrary.error(localSource) : null;
   // STREAM-DL-001: the song plays from its source while it downloads, on this page's own deck (the
   // Android engine streams for itself). Whichever is playable first wins; a stream that has started
@@ -379,14 +389,8 @@ export function Player({ playing, upNext, docked, canPrev, canNext, shuffle, rep
     setBadVideo(null);
   }, [key]);
 
-  // Volume and mute reach whichever source is playing, and are remembered.
+  // Volume and mute reach whichever source is playing (the level itself is remembered by its store).
   useEffect(() => {
-    try {
-      window.localStorage.setItem(VOLUME_KEY, JSON.stringify(vol));
-    } catch {
-      /* private mode: the volume just is not remembered */
-    }
-    if (vol.value > 0) lastLevel.current = vol.value;
     const silent = isSilent(vol);
     // Both decks, not just the current one: during a blend the incoming song is already audible,
     // and leaving it at full level would make every transition jump in loudness.
@@ -613,6 +617,7 @@ export function Player({ playing, upNext, docked, canPrev, canNext, shuffle, rep
       if (!source) return;
       const protectedUrls = [localSource, source].filter((u): u is string => Boolean(u));
       localLibrary.protect(protectedUrls);
+      songSources.set(nextTrack.key, source);
       void queueAudio.protect(cacheGb, protectedUrls).then(() => localLibrary.ensure(source, `${nextTrack.title} — ${nextTrack.artist}`, false, true)).catch(() => undefined);
     }).catch(() => undefined);
     return () => { live = false; };
@@ -794,7 +799,10 @@ export function Player({ playing, upNext, docked, canPrev, canNext, shuffle, rep
       setDeck(blended.deck);
     }
     if (canNext) onNext();
-    else if (blended) mixer.current?.cancel();
+    else {
+      if (blended) mixer.current?.cancel();
+      else if (endedKey) waitingAfter.current = { key: endedKey, at: Date.now() };
+    }
   };
 
   const next = () => {
@@ -810,6 +818,16 @@ export function Player({ playing, upNext, docked, canPrev, canNext, shuffle, rep
       });
     onNext();
   };
+  // SHUFFLE-ONCE-001: a song found or made ready after the last one played out starts by itself, unless the listener has
+  // picked something meanwhile or it has been more than half an hour.
+  useEffect(() => {
+    const w = waitingAfter.current;
+    if (!w) return;
+    if (w.key !== key || Date.now() - w.at > WAIT_NEXT_MS) { waitingAfter.current = null; return; }
+    if (!canNext || !ended.current) return;
+    waitingAfter.current = null;
+    onNext();
+  }, [canNext, key]);
   // PLAYER-SWIPE-001: on the phone's player, swipe the song left for the next one, right for the previous.
   const swipe = usePlayerSwipe({ onNext: next, onPrev, canNext, canPrev, enabled: Boolean(docked && playing) });
 
@@ -903,17 +921,16 @@ export function Player({ playing, upNext, docked, canPrev, canNext, shuffle, rep
     </div>
   ) : null;
 
-  const volume = playing ? (
-    <Volume
-      value={vol.value}
-      max={canBoost ? VOLUME_MAX : 1}
-      muted={isSilent(vol)}
-      disabled={mode === 'embed' || mode === 'none'}
-      disabledReason="SoundCloud’s player has its own volume control."
-      onChange={(v) => setVol({ value: v, muted: false })}
-      onToggleMute={() => setVol((x) => toggleMuteState(x, lastLevel.current))}
-    />
-  ) : null;
+  // VOLUME-SETTINGS-001: the control is at the top of Settings; it is told how high this source can go, and when
+  // the source keeps its own volume.
+  const volumeBlocked = Boolean(playing) && (mode === 'embed' || mode === 'none');
+  useEffect(() => {
+    volumeStore.setLimits(canBoost ? VOLUME_MAX : 1, volumeBlocked ? 'SoundCloud’s player has its own volume control.' : '');
+    return () => volumeStore.setLimits(VOLUME_MAX, '');
+  }, [canBoost, volumeBlocked]);
+  // PLAYER-ARTIST-HEART-001 (owner, 2026-11-22): in the volume's place, "a button and icon to heart the current
+  // playing artist on the song and add them to your listening algorithim".
+  const artistHeart = playing ? <PlayingArtistHeart artists={artistNamesOf(playing.track, playing.track.artist ?? '')} /> : null;
 
   // What the mixer is doing, in the listener's words — and it takes the *place* of the preview
   // note rather than stacking under it. Two grey lines under the artist made the strip forty
@@ -1021,7 +1038,7 @@ export function Player({ playing, upNext, docked, canPrev, canNext, shuffle, rep
       play: () => { if (!isPlayingNow()) toggle(); },
       pause: () => { if (isPlayingNow()) toggle(); },
       seek: (ms) => seek(Math.max(0, ms) / 1000),
-      volume: (v) => setVol({ value: v, muted: false }),
+      volume: (v) => volumeStore.set(v),
     });
   });
   /**
@@ -1215,10 +1232,10 @@ export function Player({ playing, upNext, docked, canPrev, canNext, shuffle, rep
           {docked ? (
             <div className="np__dockctl">
               {progress}
-              {/* One control row: transport, volume, then the song's own actions. They were a third
+              {/* One control row: transport, the current artist's heart, then the song's own actions. They were a third
                   row, which made the dock 200px tall and read as a separate toolbar. */}
               {/* DOCK-CENTRE-001 (owner, 2026-11-19): previous, play and next sit in the middle of the row;
-                  the song's star and X with shuffle on the left, repeat, download, similar and volume on the right. */}
+                  the song's star and X with shuffle on the left, repeat, download, similar and the artist's heart on the right. */}
               <div className="np__controls np__controls--centred">
                 <div className="np__ctl-side np__ctl-side--start">
                   <PlayerActions key={`${t!.key}:judge`} {...actions} only={['star', 'dislike']} held={Boolean(heldShown)} />
@@ -1230,7 +1247,7 @@ export function Player({ playing, upNext, docked, canPrev, canNext, shuffle, rep
                 <div className="np__ctl-side np__ctl-side--end">
                   {repeatBtn}
                   <PlayerActions key={`${t!.key}:keep`} {...actions} only={['download', 'similar']} held={Boolean(heldShown)} />
-                  {volume}
+                  {artistHeart}
                 </div>
               </div>
             </div>
@@ -1242,7 +1259,7 @@ export function Player({ playing, upNext, docked, canPrev, canNext, shuffle, rep
                   grid with areas for four left like/dislike/download to auto-place into a stray
                   third row under the art. */}
               <div className="np__side">
-                {volume}
+                {artistHeart}
                 <PlayerActions key={t!.key} {...actions} held={Boolean(heldShown)} />
                 {openLinks}
               </div>

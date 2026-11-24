@@ -491,6 +491,16 @@ export interface Context {
   rankV2?: boolean;
   /** Long/recent/session taste blend (v2 only); when present it replaces `taste` in scoring. */
   taste2?: TasteBlend | null;
+  /**
+   * ARTIST-SIZE-001: how much of its score a song keeps for its artist's size against the listener's (artist-size.ts
+   * sizeFit, 0.05-1). Absent, or 1, changes nothing; it only ever lowers a score.
+   */
+  artistFit?: ((c: Track) => number) | undefined;
+  /**
+   * ARTIST-VARIETY-001: songs by each artist (primaryArtist) already in the queue still to play, or just heard. They
+   * count against maxPerArtist, so batch after batch cannot pile one artist up. Absent changes nothing.
+   */
+  artistLoad?: Readonly<Record<string, number>> | undefined;
 }
 
 export function dot(a: Float64Array, b: Float64Array): number {
@@ -668,9 +678,11 @@ export function scoreOne(c: Track, ctx: Context): Scored {
   }
   const have = seedW + (g.feedback !== null && g.feedback !== undefined ? covFeedback : 0.0);
   const coverage = allAff > 1e-12 ? Math.min(1, have / allAff) : 0.0;
-  const final = affinity * (cfg.coverageFloor + (1 - cfg.coverageFloor) * coverage);
+  const sizeFit = ctx.artistFit ? Math.min(1, Math.max(0, ctx.artistFit(c))) : null;
+  const final = affinity * (cfg.coverageFloor + (1 - cfg.coverageFloor) * coverage) * (sizeFit ?? 1);
   const factors: Record<string, number | null> = bestKey ? { ...perSeedFactors[bestKey] } : {};
   Object.assign(factors, g);
+  if (sizeFit !== null) factors['size'] = sizeFit;
   let weightsUsed: Record<string, number>;
   if (bestKey) {
     weightsUsed = { ...perSeedWs[bestKey] };
@@ -779,7 +791,7 @@ export function select(scored: Scored[], ctx: Context): Scored[] {
     pools[k]!.sort((x, y) => y.final - y.exposurePenalty - (x.final - x.exposurePenalty) || (x.track.key < y.track.key ? -1 : x.track.key > y.track.key ? 1 : 0));
   }
   const chosen: Scored[] = [];
-  const perArtist: Record<string, number> = {};
+  const perArtist: Record<string, number> = { ...(ctx.artistLoad ?? {}) };
   const perSeed: Record<string, number> = {};
   const seeds = ctx.seeds.map((s) => s.key);
   const emphOf = (s: Track) => Math.max(0.1, Number(s.emphasis ?? 1.0));

@@ -3,7 +3,7 @@
  * needs no server. `handle()` takes what the UI would have sent to /api/* and returns what the server
  * would have answered, status code included. Jobs run as async tasks; the browser polls them as before.
  */
-import { applyAlgorithmPatch, engineFromSettings, settingsWithAlgorithms } from './algorithms';
+import { BUILT_IN_ID, activeAlgorithm, applyAlgorithmPatch, engineFromSettings, settingsWithAlgorithms } from './algorithms';
 import * as A from './audio';
 import { isSimilarityPercent, selectSimilar, soundMatch, SIMILAR_DEFAULT, SIMILAR_FLOOR, SIMILAR_LIMIT, type SoundHit, type SoundTrack } from './similar-sound';
 import { customOutcome, normaliseCriteria, runCustomDiscovery, songIdOf, type CandidateTrack, type CustomCriteria, type CustomPorts } from './custom-discovery';
@@ -51,6 +51,7 @@ const IMPORTED_SOURCE_TTL = 10 * 365 * 86400;
 
 import { buildProfile } from './profile';
 import { playlistMix } from './playlist-mix';
+import { parseHeld, shapeLists, type Held } from './playlist-delta';
 import { albumGenres, baseAlbumTitle, releaseGroupId, tagsFromReleaseGroup } from './album-genres';
 import { seedWindow } from './seed-window';
 import type { Tag } from './genres';
@@ -63,6 +64,11 @@ import { BlockedUrl, BudgetExceeded, Cancelled, FetchError, Http, type HttpPort,
 import { dl, downloadsAvailable } from './downloads';
 import { localAudioUrl } from './local-audio';
 import { Job, Pipeline, pmap, type Embedder } from './pipeline';
+import { FAV_ARTISTS_KEY, FAV_PER_RUN, addFav, favMap, favSeed, normaliseFav, normaliseFavs, removeFav, type FavArtist } from './fav-artists';
+import { referenceSize, sizeFit, smallScene } from './artist-size';
+import { coldReason, coldStarters, type ColdStarter } from './cold-start';
+import { artistLoad } from './artist-variety';
+import { FLOW_KEY, dryReason, flowPick, flowState, heardTest } from './queue-data-flow';
 import { SOURCE_LABELS, cleanTrack, playbackFor, round, type Dict } from './shape';
 import { AppleMusic } from './apple';
 import { Albums } from './albums';
@@ -90,7 +96,7 @@ export interface LocalDeps {
   now?: () => number;
   /** Spotify search, only where a shell can run spotDL (Windows). Absent on Android, where Spotify search is unavailable. */
   /** Builds the Spotify search on this api's own Http client. Absent only in tests. */
-  spotifySearch?: (http: Http) => (q: string, limit: number) => Promise<Dict[]>;
+  spotifySearch?: (http: Http, store?: Store) => (q: string, limit: number) => Promise<Dict[]>;
 }
 
 export interface LocalResponse {
@@ -155,6 +161,8 @@ const FEEDBACK_KINDS = new Set(['qualified', 'like', 'dislike', 'hide', 'save', 
 const QUEUE_PLAYLIST_KEY = 'queue_playlist';
 /** Songs saved lists were made with (ALBUM-OPEN-001), by key, so a list made from an album shows every song. */
 const LIST_TRACKS_KEY = 'list_tracks';
+/** QUEUE-DATA-FLOW-001: how many of the listener's artists the listening top-ups walk through, a few per run. */
+const FLOW_POOL = 24;
 /** TAGS-ALWAYS-001: genres looked up for saved songs that had none, by song key. */
 const SAVED_TAGS_KEY = 'saved_tags';
 /** TAGS-ALWAYS-001: release dates looked up for saved songs that had none (key -> release or year hint). */
@@ -318,7 +326,7 @@ export class LocalApi {
     this.sp = new Spotify(this.http, this.store);
     this.genius = new Genius(this.http);
     this.shazam = new Shazam(this.http);
-    this.spotifySearch = deps.spotifySearch ? deps.spotifySearch(this.http) : null;
+    this.spotifySearch = deps.spotifySearch ? deps.spotifySearch(this.http, this.store) : null;
     this.pipeline = new Pipeline(this.store, this.http, this.dz, this.ytm, this.sc, this.apple, this.spotifySearch, this.encoder);
     this.store.expireImpressions(unixNow() - DEFAULT_ENGINE.exposureWindowDays * 86400 * 4);
   }
@@ -430,6 +438,7 @@ export class LocalApi {
       if (m === 'POST' && path === '/api/resolve') return await this.resolve(String(body?.['url'] ?? ''));
       if (m === 'POST' && path === '/api/complete-spotify') return ok(await this.completeSpotify(String(body?.['title'] ?? ''), String(body?.['artist'] ?? '')));
       if (path === '/api/seeds') return m === 'PUT' ? await this.putSeeds(body ?? {}) : ok(this.seedsView());
+      if (path === '/api/fav-artists') return m === 'POST' ? await this.editFavArtists(body ?? {}) : ok(this.favArtistsView());
       if (path === '/api/settings') return m === 'PUT' ? await this.putSettings(body ?? {}) : ok(this.settings());
       if (m === 'POST' && path === '/api/recommend') {
         // ALLOWANCE-ARCH-001: a top-up decides on the connection as it is now (the phone may have joined Wi-Fi since).
@@ -449,7 +458,8 @@ export class LocalApi {
       if (m === 'POST' && path === '/api/embed-local') return await this.embedLocal(body ?? {});
       if (m === 'GET' && path === '/api/saved') return ok(this.saved());
       if (m === 'POST' && path === '/api/genres') return ok(await this.genresFor(((body ?? {})['tracks'] as Dict[] | undefined) ?? []));
-      if (m === 'GET' && path === '/api/playlists') return ok(this.playlists());
+      // PLAYLIST-DELTA-001: a caller that names the versions it holds is sent only the lists that changed.
+      if (m === 'GET' && path === '/api/playlists') return ok(this.playlists(parseHeld(q.get('have'))));
       if (m === 'POST' && path === '/api/playlists') return await this.playlistAction(body ?? {});
       if (m === 'GET' && path === '/api/status') return ok(await this.status());
       if (m === 'POST' && path === '/api/reset') return this.reset(Boolean(body?.['clear_cache']));
@@ -1542,6 +1552,96 @@ export class LocalApi {
     return ok(settingsWithAlgorithms(cur));
   }
 
+  // ---- starred artists (ARTIST-FAV-001) and artist size (ARTIST-SIZE-001) ----------------------
+  /** ARTIST-FAV-ALGO-001: the active algorithm's starred artists; every other preset keeps its own. */
+  private favArtists(): FavArtist[] {
+    const alg = activeAlgorithm(this.settings());
+    const raw = this.store.get(FAV_ARTISTS_KEY);
+    const map = favMap(raw, alg.id);
+    // A list from before lists were per algorithm is pinned to the algorithm active now, once.
+    if (Array.isArray(raw)) void this.store.put(FAV_ARTISTS_KEY, map);
+    return map[alg.id] ?? [];
+  }
+
+  private favArtistsView(): Dict {
+    const alg = activeAlgorithm(this.settings());
+    return { artists: this.favArtists(), algorithm: { id: alg.id, name: alg.name } };
+  }
+
+  /** `{op: 'add', artist}`, `{op: 'remove', name}` or `{op: 'set', artists}`; answers with the whole list. */
+  private async editFavArtists(body: Dict): Promise<LocalResponse> {
+    const op = String(body['op'] ?? '');
+    let list = this.favArtists();
+    if (op === 'add') {
+      const a = normaliseFav(body['artist']);
+      if (!a) return fail(400, 'An artist with a name is needed.');
+      list = addFav(list, { ...a, addedAt: Date.now() });
+    } else if (op === 'remove') {
+      const name = String(body['name'] ?? '').trim();
+      if (!name) return fail(400, 'Which artist?');
+      list = removeFav(list, name);
+    } else if (op === 'set') {
+      list = normaliseFavs(body['artists']);
+    } else return fail(400, 'Unknown change to the artist list.');
+    // Only the active algorithm's list changes; lists of algorithms since deleted are dropped.
+    const s = this.settings();
+    const alg = activeAlgorithm(s);
+    const all = favMap(this.store.get(FAV_ARTISTS_KEY), alg.id);
+    const live = new Set([BUILT_IN_ID, ...((settingsWithAlgorithms(s)['algorithms'] as { id: string }[]) ?? []).map((a) => a.id)]);
+    const next: Record<string, FavArtist[]> = {};
+    for (const [id, l] of Object.entries(all)) if (live.has(id) && l.length) next[id] = l;
+    if (list.length) next[alg.id] = list; else delete next[alg.id];
+    await this.store.put(FAV_ARTISTS_KEY, next);
+    return ok(this.favArtistsView());
+  }
+
+  /** Each starred artist as a starting point, its Deezer id found by name when the star did not carry one. */
+  private async favSeeds(job: Job, favs: readonly FavArtist[]): Promise<{ seed: Dict; profile: Dict }[]> {
+    const c = { meter: job.meter ?? undefined, token: job.token };
+    return pmap(favs, 3, async (a) => {
+      let id = a.deezerId;
+      if (!id) id = await this.dz.artistByName(a.name, c).then((x) => x?.id ?? null, () => null);
+      return favSeed(a, id);
+    });
+  }
+
+  /** The typical Deezer follower count of the starting and starred artists, or null when none is known. */
+  private async sizeReference(job: Job, seedViews: readonly Dict[], profiles: Record<string, Dict>, favs: readonly FavArtist[]): Promise<number | null> {
+    const c = { meter: job.meter ?? undefined, token: job.token };
+    const byName = new Map(favs.map((f) => [fold(f.name), f]));
+    const asks = new Map<string, { id: string | null; name: string; fans: number | null }>();
+    for (const sv of seedViews) {
+      const name = String((sv['artists'] as string[] | undefined)?.[0] ?? '');
+      if (!name || asks.has(fold(name))) continue;
+      const fav = byName.get(fold(name));
+      const dz = ((profiles[String(sv['key'])]?.['dz'] as Dict | null)?.['artist_ids'] as Dict | undefined)?.['deezer'];
+      asks.set(fold(name), { id: typeof dz === 'string' && dz ? dz : fav?.deezerId ?? null, name, fans: fav?.fans ?? null });
+      if (asks.size >= 12) break;
+    }
+    const fans = await pmap([...asks.values()], 3, (a) => (a.fans !== null ? Promise.resolve(a.fans) : this.dz.artistFans(a.id, a.name, c).catch(() => null)));
+    return referenceSize(fans);
+  }
+
+  /** The size fit of each leading song's main artist; null when no artist could be sized. */
+  private async sizeFitFor(job: Job, reference: number, tracks: readonly Dict[]): Promise<((t: E.Track) => number) | null> {
+    const c = { meter: job.meter ?? undefined, token: job.token };
+    const artists = new Map<string, { id: string | null; name: string }>();
+    for (const t of tracks) {
+      const name = String((t['artists'] as string[] | undefined)?.[0] ?? '');
+      if (!name || artists.has(fold(name))) continue;
+      const dz = (t['artist_ids'] as Dict | undefined)?.['deezer'];
+      artists.set(fold(name), { id: typeof dz === 'string' && dz ? dz : null, name });
+      if (artists.size >= 40) break;
+    }
+    const list = [...artists.entries()];
+    const sizes = await pmap(list, 4, ([, a]) => this.dz.artistFans(a.id, a.name, c).catch(() => null));
+    const fans = new Map<string, number>();
+    list.forEach(([k], i) => { const n = sizes[i]; if (typeof n === 'number') fans.set(k, n); });
+    job.timings['sized_artists'] = fans.size;
+    if (!fans.size) return null;
+    return (t) => sizeFit(fans.get(fold(String(t.artists?.[0] ?? ''))) ?? null, reference);
+  }
+
   // ---- recommend -----------------------------------------------------------------------
   /**
    * Starts one discovery batch. Searching is one way in; finishing a song from a list that has
@@ -1552,19 +1652,29 @@ export class LocalApi {
     const settings = this.settings();
     const listening = body['trigger'] === 'listening';
     let moodLead: string[] | undefined;
+    let lane: Lane = 'interactive';
     if (listening) {
       const guard = this.listeningGuard(body, settings);
       if (guard.skip) return ok({ job: null, reason: guard.reason, ...(guard.resumes_at ? { resumes_at: guard.resumes_at } : {}) });
       seeds = guard.seeds;
       moodLead = guard.mood;
+      lane = guard.lane;
     }
-    if (!seeds.length) return fail(400, 'Add at least one starting song first.');
+    // ARTIST-FAV-001: starred artists are starting points of their own, so they alone are enough to discover from.
+    // NEXT-FAV-COLD-001 (owner, 2026-11-23): "the find my new favorite button should work without a starting song
+    // and with no songs in queue. It should use the users listening algorithm, taste map, and favorite artist".
+    // With no starting song the run begins from the stars, the listening and the taste map instead; only a listener
+    // with none of the three has nothing to go on.
+    if (!seeds.length && !listening && !this.coldStarters().length) {
+      return fail(400, 'Nothing to go on yet. Play, like or star something \u2014 or add a starting song \u2014 and this finds music from it.');
+    }
+    if (!seeds.length && listening && !this.favArtists().length) return fail(400, 'Add at least one starting song first.');
     if (this.currentJob) this.jobs.get(this.currentJob)?.token.cancel('superseded by a newer request');
     const job = new Job(newId());
     this.jobs.set(job.id, job);
     this.currentJob = job.id;
     for (const [k, j] of this.jobs) if (j.done && unixNow() - j.started > 900) this.jobs.delete(k);
-    void this.runJob(job, seeds, settings, listening ? 'listening' : 'search');
+    void this.runJob(job, seeds, settings, listening ? 'listening' : 'search', lane);
     return ok(moodLead ? { job: job.id, mood: moodLead } : { job: job.id });
   }
 
@@ -1840,7 +1950,7 @@ export class LocalApi {
    * came from the list counts, and only while the unplayed remainder is nearly gone; a skip, a
    * replay, a pause or a preview from search never starts a search. One listen starts one batch.
    */
-  private listeningGuard(body: Dict, settings: Dict): { skip: true; reason: string; resumes_at?: number } | { skip: false; seeds: Dict[]; mood?: string[] } {
+  private listeningGuard(body: Dict, settings: Dict): { skip: true; reason: string; resumes_at?: number } | { skip: false; seeds: Dict[]; mood?: string[]; lane: Lane } {
     const seeds = this.store.seeds() as Dict[];
     const eventId = String(body['event_id'] ?? '');
     const event = this.store.feedback().find((f) => (f as unknown as Dict)['event_id'] === eventId) as unknown as Dict | undefined;
@@ -1879,8 +1989,12 @@ export class LocalApi {
     const active = this.currentJob ? this.jobs.get(this.currentJob) : null;
     if (active && !active.done) return { skip: true, reason: 'Discovery is already running.' };
     // ALLOWANCE-ARCH-001: a top-up nobody asked for by hand waits for the reserve on mobile data, and says when it resumes.
+    // QUEUE-NEVER-DRY-001 (owner, 2026-11-22): "the discovery / now playing queue needs to keep finding new music, the
+    // user should never be able to fully listen to all the songs in now playing queue twice without anything new being
+    // found". A queue that is nearly all heard is what plays next, so its top-up is playback, which the allowance never
+    // limits; only the mood's optional top-up waits for the reserve.
     const allowance = this.budget.state();
-    if (allowance.paused) return { skip: true, reason: 'Finding new songs is paused to save mobile data.', ...(allowance.resumes_at ? { resumes_at: allowance.resumes_at } : {}) };
+    if (!low && allowance.paused) return { skip: true, reason: 'Finding new songs is paused to save mobile data.', ...(allowance.resumes_at ? { resumes_at: allowance.resumes_at } : {}) };
     const handled = (this.store.get<string[]>('discovery_events') ?? []) as string[];
     if (handled.includes(eventId)) return { skip: true, reason: 'Already discovered for this listen.' };
     void this.store.put('discovery_events', [...handled.slice(-99), eventId]);
@@ -1891,9 +2005,9 @@ export class LocalApi {
       void this.store.put(MOOD_DISCOVERY_AT, unixNow());
       const first = [...want.seeds, ...(heard ? [heard] : [])];
       const firstKeys = new Set(first.map((t) => String(t['key'])));
-      return { skip: false, seeds: [...first.filter((t, i) => first.findIndex((u) => u['key'] === t['key']) === i), ...seeds.filter((s) => !firstKeys.has(String(s['key'])))], mood: want.leading };
+      return { skip: false, seeds: [...first.filter((t, i) => first.findIndex((u) => u['key'] === t['key']) === i), ...seeds.filter((s) => !firstKeys.has(String(s['key'])))], mood: want.leading, lane: 'background' };
     }
-    return { skip: false, seeds: heard ? [heard, ...seeds.filter((s) => s['key'] !== event['key'])] : seeds };
+    return { skip: false, seeds: heard ? [heard, ...seeds.filter((s) => s['key'] !== event['key'])] : seeds, lane: 'playback' };
   }
 
   /**
@@ -1962,25 +2076,41 @@ export class LocalApi {
     };
   }
 
-  private async runJob(job: Job, seeds: Dict[], settings: Dict, trigger: 'search' | 'listening' = 'search'): Promise<void> {
+  private async runJob(job: Job, seeds: Dict[], settings: Dict, trigger: 'search' | 'listening' = 'search', lane: Lane = trigger === 'listening' ? 'background' : 'interactive'): Promise<void> {
     const p = this.pipeline;
     const t0 = performance.now();
     const since = () => Math.round(performance.now() - t0);
     // The list as it stands. A batch adds to it; lowering the limit never shortens it.
     const previous = (this.store.get<Dict>('last_result')?.['items'] ?? []) as { track: Dict }[];
     const held = [...(this.store.seeds() as Dict[]), ...previous.map((x) => x.track)];
+    // ARTIST-VARIETY-001: the songs by each artist already waiting in the queue, and in the last few listens, count
+    // against the per-artist cap, so batch after batch cannot pile one artist up.
+    const listens = this.store.feedback().filter((r) => r.kind === 'complete' || r.kind === 'skip');
+    const load = artistLoad(previous, new Set(listens.map((r) => r.key)));
     const limit = Number(settings['queue_size'] ?? DEFAULT_ENGINE.queueSize);
     const merge = (batch: Dict): Dict => {
       // QUEUE-ADD-001: append to the queue as it stands now, so a song the listener added while this
       // batch was being found is kept rather than overwritten by the queue as it was at the start.
       const now = (this.store.get<Dict>('last_result')?.['items'] ?? previous) as { track: Dict }[];
       const items = appendDiscovery(now, (batch['items'] ?? []) as { track: Dict }[], limit);
-      return { ...batch, items, count: items.length, discovery: { added: items.length - now.length, limit, trigger } };
+      // NEXT-FAV-COLD-001: a run with no starting song says which of the three it read.
+      const from = coldReason(coldUsed);
+      return { ...batch, items, count: items.length, ...(from ? { started_from: from } : {}), discovery: { added: items.length - now.length, limit, trigger } };
     };
+    /** NEXT-FAV-COLD-001: filled in below once the seedless run knows its starting artists. */
+    let coldUsed: ColdStarter[] = [];
+    // QUEUE-DATA-FLOW-001: a top-up never offers a song the listener has already finished or skipped.
+    const heardBefore = trigger === 'listening' ? heardTest(this.store.feedback() as never) : null;
+    const unheard = (t: Dict): boolean => !heardBefore || !heardBefore(t);
     try {
       const cfg = { ...engineFromSettings(settings), queueSize: Number(settings['queue_size'] ?? DEFAULT_ENGINE.queueSize) };
       const es = E.normaliseSettings({ fresh: Boolean(settings['fresh']), adventurous: settings['adventurous'] });
-      job.meter = this.jobMeter(settings, trigger === 'listening' ? 'background' : 'interactive');
+      // QUEUE-DATA-FLOW-001: a top-up while listening is never refused for the allowance when the queue is running
+      // dry, so on mobile data each one is held to a small ceiling instead (Budget.topUpCap).
+      const topUp = trigger === 'listening';
+      job.meter = topUp
+        ? this.budget.meter(lane, this.budget.topUpCap(Math.trunc(Number(settings['request_mb'] ?? TRANSFER.perRequest / 1e6) * 1e6)))
+        : this.jobMeter(settings, lane);
       job.phase = 'profiling';
       job.progress = 'Looking up your starting songs';
       // PLAYLIST-QUEUE-001: a long list of starting songs (a saved list sent to the queue) is asked
@@ -1996,8 +2126,38 @@ export class LocalApi {
         if (asked.has(String(sd['key']))) continue;
         profiles[sd['key']] = (this.store.cacheGet(`seedprofile:${sd['id']}`, true)?.value as Dict | undefined) ?? { dz: null, ytm_vid: null, dz_uncertain: [] };
       }
-      const seedViews = seeds.map((sd) => p.seedView(sd, profiles[sd['key']] as Dict));
-      const gatherViews = seedViews.filter((sv) => asked.has(String(sv['key'])));
+      // ARTIST-FAV-001: the newest starred artists join as starting points of their own (their radio, top songs and
+      // related artists), on every Find my next favorite run with no Customize options needed.
+      // NEXT-FAV-COLD-001: with no starting song the run's starting points are the listener's stars, the artists
+      // their listening says they like, and their taste map's colours — in that order, run-only.
+      const cold = topUp || seeds.length ? [] : this.coldStarters(FAV_PER_RUN);
+      coldUsed = cold;
+      const asFav = (cs: ColdStarter): FavArtist => this.favArtists().find((f) => fold(f.name) === fold(cs.name)) ?? { name: cs.name, deezerId: null, fans: null, picture: null, pageId: null, addedAt: 0 };
+      // QUEUE-DATA-FLOW-001 (owner, 2026-11-23): "the discovery engine doesnt continously find new songs ... you
+      // repeat the same songs". A top-up used to ask only the starting songs, so once their sources were spent every
+      // run came back with what the queue already held. Each top-up now also asks a few of the listener's own
+      // artists — starred, then learned from listening, then their sound's — carrying on where the last one stopped.
+      const flow = flowState(this.store.get(FLOW_KEY));
+      const seedArtists = new Set(win.window.map((sd) => fold(String((sd['artists'] as string[] | undefined)?.[0] ?? sd['artist'] ?? ''))));
+      const flowPool = topUp ? this.coldStarters(FLOW_POOL).filter((cs) => !seedArtists.has(fold(cs.name))) : [];
+      const walk = flowPick(flowPool, flow);
+      const settleFlow = async (added: number) => {
+        if (topUp) await this.store.put(FLOW_KEY, { cursor: walk.next, dry: added > 0 ? 0 : flow.dry + 1 });
+      };
+      const favs = topUp
+        ? walk.picked.map(asFav)
+        : cold.length
+          ? cold.map(asFav)
+          : this.favArtists().slice(0, FAV_PER_RUN);
+      job.timings['cold_start'] = cold.length;
+      if (cold.length) job.progress = 'Reading your listening and your sound';
+      const favParts = await this.favSeeds(job, favs);
+      for (const f of favParts) profiles[String(f.seed['key'])] = f.profile;
+      const seedViews = [...seeds.map((sd) => p.seedView(sd, profiles[sd['key']] as Dict)), ...favParts.map((f) => f.seed)];
+      const gatherViews = seedViews.filter((sv) => asked.has(String(sv['key'])) || sv['fav_artist'] === true);
+      // ARTIST-SIZE-001: the size the list aims for, from the starting and starred artists' Deezer followers.
+      const sizeRef = await this.sizeReference(job, seedViews, profiles, favs);
+      job.timings['size_ref'] = sizeRef ?? 0;
       job.timings['seeds'] = seeds.length;
       job.timings['seeds_asked'] = gatherViews.length;
       job.timings['profile_ms'] = since();
@@ -2018,9 +2178,9 @@ export class LocalApi {
           const relMapQ = new Map([...relPartial].filter(([, v]) => v.size));
           const ctxQ: E.Context = {
             seeds: seedViews as never, vectors: new Map(), relatedArtists: relMapQ, feedback: fb, impressions: imps,
-            settings: es2, now: new Date(), cfg, taste, rankV2: v2, taste2,
+            settings: es2, now: new Date(), cfg, taste, rankV2: v2, taste2, artistLoad: load,
           };
-          const quickChosen = E.select(E.scoreAll(newDiscoveryTracks(quick, held) as never, ctxQ), ctxQ);
+          const quickChosen = E.select(E.scoreAll(newDiscoveryTracks(quick, held).filter(unheard) as never, ctxQ), ctxQ);
           if (quickChosen.length) {
             job.result = merge(this.serialise(quickChosen, ctxQ, 'gathering', job));
             job.progress = `First ${quickChosen.length} songs found; still asking the other services`;
@@ -2038,21 +2198,32 @@ export class LocalApi {
       const colours = this.colourList(taste);
       if (colours.length) await this.store.put(TASTE_CURSOR_KEY, colourCursor + 1);
       job.timings['taste_colours'] = colours.length;
-      const gathered = await p.gather(job, gatherViews, profiles, cfg, es.fresh, onPartial, deepAlbums, { colours, cursor: colourCursor });
+      const gathered = await p.gather(job, gatherViews, profiles, cfg, es.fresh, onPartial, deepAlbums, { colours, cursor: colourCursor }, { skipCharts: smallScene(sizeRef), cheapFirst: topUp && !this.budget.unmetered });
       const related = gathered.related;
-      // Only songs the list does not already hold can take a slot in this batch.
-      const cands = newDiscoveryTracks(gathered.cands, held);
+      // Only songs the list does not already hold can take a slot in this batch — and, for a top-up, only songs
+      // the listener has not already heard (QUEUE-DATA-FLOW-001: a heard song must never come back as new).
+      const cands = newDiscoveryTracks(gathered.cands, held).filter(unheard);
       job.timings['gather_ms'] = since() - job.timings['profile_ms'];
       job.timings['candidates'] = cands.length;
       if (!cands.length) {
+        await settleFlow(0);
         job.result = merge({
           phase: 'final', items: [], count: 0, asked: cfg.queueSize, sources: job.sources, audio: job.audio, timings: job.timings,
           transfer: { ...job.meter.counts },
-          empty_reason: previous.length
+          // QUEUE-DATA-FLOW-001: a top-up that found nothing new says what it asked and what the next one asks.
+          empty_reason: topUp
+            ? dryReason(
+              { seeds: win.window.filter((sd) => seeds.some((s0) => s0['key'] === sd['key'])).length, artists: walk.picked.map((x) => x.name), colours: colours.length },
+              flowPick(flowPool, { cursor: walk.next, dry: flow.dry + 1 }).picked.map((x) => x.name).filter((nm) => !walk.picked.some((x) => x.name === nm)),
+            )
+            : previous.length
             ? colours.length
               ? 'No new songs this time. Your list is unchanged; the next run reads further into your sound.'
               : 'No new songs this time. Your list is unchanged. Finish or like a few songs and your sound starts finding more on its own.'
-            : 'No service returned related songs for these starting songs.',
+            : coldUsed.length
+              // NEXT-FAV-COLD-001: a seedless run names what it read rather than blaming starting songs there are none of.
+              ? `No service returned songs for ${coldUsed.slice(0, 3).map((x) => x.name).join(', ')}. Try again, or add a starting song.`
+              : 'No service returned related songs for these starting songs.',
         });
         return;
       }
@@ -2068,9 +2239,15 @@ export class LocalApi {
         if (v) vectors.set(sv['key'], Float64Array.from(v));
       }
       const relMap = new Map([...related].filter(([, v]) => v.size));
-      const ctx: E.Context = { seeds: seedViews as never, vectors, relatedArtists: relMap, feedback: fb, impressions: imps, settings: es, now: new Date(), cfg, taste, rankV2: v2, taste2 };
+      const ctx: E.Context = { seeds: seedViews as never, vectors, relatedArtists: relMap, feedback: fb, impressions: imps, settings: es, now: new Date(), cfg, taste, rankV2: v2, taste2, artistLoad: load };
       let scored = E.scoreAll(cands as never, ctx);
       let chosen = E.select(scored, ctx);
+      // ARTIST-SIZE-001: the leading songs' artists are sized and the list is ranked again with their fit.
+      if (sizeRef !== null) {
+        job.progress = 'Matching artists of a similar size';
+        const fit = await this.sizeFitFor(job, sizeRef, scored.slice(0, 60).map((x) => x.track as Dict));
+        if (fit) { ctx.artistFit = fit; scored = E.scoreAll(cands as never, ctx); chosen = E.select(scored, ctx); }
+      }
       job.timings['metadata_ms'] = since();
       job.result = merge(this.serialise(chosen, ctx, 'metadata', job));
 
@@ -2196,6 +2373,7 @@ export class LocalApi {
         cands: poolCands, seeds: seedViews, related: [...relMap].map(([k, v]) => [k, [...v]]), settings: es, weights: settings['weights'] ?? null,
       });
       await this.store.put('last_result', { ...job.result, saved_at: unixNow() });
+      await settleFlow(Number(((job.result as Dict | null)?.['discovery'] as Dict | undefined)?.['added'] ?? 0));
     } catch (e) {
       job.error = e instanceof Cancelled ? 'cancelled' : `${(e as Error).name}: ${(e as Error).message}`;
     } finally {
@@ -2222,6 +2400,8 @@ export class LocalApi {
     // must not trim it here: a smaller limit would otherwise drop songs the listener still has.
     const ctx: E.Context = {
       ...pool.ctx,
+      // ARTIST-VARIETY-001: the pool's own songs are the queue; counting them as already waiting would cap them out.
+      artistLoad: undefined,
       // ALGO-MANAGER-001: the algorithm active NOW ranks the pool, over the run's own engine base.
       cfg: { ...engineFromSettings(settings, cfg), queueSize: Math.max(pool.cands.length, 1) },
       feedback: v2 ? E.withSavedAlbums(E.buildFeedback2(this.store.feedback() as never, unixNow(), cfg), this.savedAlbumKeys()) : E.buildFeedback(this.store.feedback() as never, unixNow(), cfg),
@@ -2485,6 +2665,21 @@ export class LocalApi {
   }
 
   /** The listening taste as of now, from every stored playback and feedback event. */
+  /**
+   * NEXT-FAV-COLD-001: the artists a Find my next favorite with no starting song begins from — the listener's
+   * starred artists, then the artists their listening says they like, then their taste map's colours. Run-only:
+   * nothing here is written into the starting songs or the starred list.
+   */
+  private coldStarters(want = FAV_PER_RUN): ColdStarter[] {
+    return coldStarters({
+      starred: this.favArtists().map((a) => a.name),
+      rows: this.historyRows().map((r) => ({ kind: r.kind, ts: r.ts, track: (r.track as Dict | null) ?? null })),
+      colours: this.colourList(this.taste()),
+      now: unixNow(),
+      cursor: Math.max(0, Math.trunc(Number(this.store.get(TASTE_CURSOR_KEY) ?? 0))),
+    }, want);
+  }
+
   /** The colours the Sound card draws, as the gather step wants them (COLOR-DISCOVERY-001). */
   private colourList(taste: TasteProfile): Colour[] {
     const sum = tasteSummary(taste);
@@ -2737,7 +2932,21 @@ export class LocalApi {
    * The lists, each with the songs it holds resolved back to tracks. A song whose track was never
    * recorded still counts towards the list's length, so the discovery gate cannot be fooled by it.
    */
-  private playlists(): Dict {
+  /** PLAYLIST-DELTA-001: the lists as last worked out, good until anything kept in the store changes. */
+  private listsMemo: { at: number; made: number; lists: (Dict & { id: string; items: unknown[] })[] } | null = null;
+
+  private playlists(held: Held | null = null): Dict {
+    // Reading a large library takes several calls (playlist-delta.ts); they must not each work all of it out again.
+    // A minute at most: a look-up that is due to be tried again changes the answer without changing the store.
+    const at = this.store.version;
+    const made = unixNow();
+    if (this.listsMemo?.at === at && made - this.listsMemo.made < 60) return { lists: shapeLists(this.listsMemo.lists, held) };
+    const full = this.playlistsNow();
+    this.listsMemo = { at, made, lists: full };
+    return { lists: shapeLists(full, held) };
+  }
+
+  private playlistsNow(): (Dict & { id: string; items: unknown[] })[] {
     const lists = this.storedPlaylists();
     const played = this.playedKeys();
     const byKey = this.knownTracks();
@@ -2757,8 +2966,7 @@ export class LocalApi {
       return this.withDate(own.length ? { ...t, tags: own } : t);
     };
     if (lists.some((l) => l.entries.some((e) => { const t = withTags(byKey.get(e.key) ?? null); return t && t['kind'] !== 'radio-programme' && t['provider'] !== 'imported' && this.savedWants(t); }))) this.kickSavedGenres();
-    return {
-      lists: lists.map((l) => {
+    return lists.map((l) => {
         const pending = l.entries.filter((e) => wanting.has(e.key)).length;
         const items = l.entries.map((e) => ({ key: e.key, added: e.added, track: withTags(byKey.get(e.key) ?? null), played: played.has(e.key) }));
         return {
@@ -2772,8 +2980,7 @@ export class LocalApi {
           items: this.importedCharacteristics(items),
           ...(pending ? { genre_pending: pending } : {}),
         };
-      }),
-    };
+      });
   }
 
   /**
@@ -2891,7 +3098,7 @@ export class LocalApi {
       throw e;
     }
     await this.savePlaylists(lists);
-    return ok(this.playlists());
+    return ok(this.playlists(parseHeld(body['have'])));
   }
 
   // ---- playback ------------------------------------------------------------------------

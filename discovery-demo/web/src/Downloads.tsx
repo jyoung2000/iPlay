@@ -3,6 +3,7 @@ import './local-music.css';
 import { Glyph } from '@now-playing/aqua-ui/icons';
 import { api, type Track } from './api';
 import { DL_FORMATS, dl, downloadsAvailable, matchTarget, targetFor, urlAllowedFor, type DlFormat, type DlHealth, type DlJob, type DlTool } from './engine/downloads';
+import { songSources } from './engine/song-sources';
 import { heldCopy } from './engine/held';
 import { classNames, fmtBytes } from './util';
 
@@ -47,11 +48,21 @@ const loadFormat = (): DlFormat => {
 const active = (j: DlJob): boolean => j.state === 'queued' || j.state === 'running';
 
 /** Owns the download list. Polls once a second while something is running, and once on demand otherwise. */
+/** RING-CLOSE-001: how long the shell's answer to a Download press stands in for a job its list has not shown. */
+export const FRESH_MAX_MS = 5000;
+
 export function useDownloads(flash: (m: string) => void) {
   const on = downloadsAvailable();
   const [jobs, setJobs] = useState<DlJob[]>([]);
   /** Which native job each song's download button started, so the button can show that job's state. */
   const [trackJobs, setTrackJobs] = useState<Record<string, string>>({});
+  const [starting, setStarting] = useState<Record<string, true>>({});
+  /** The shell's answer to each song's Download press, until its job shows in the list. */
+  const [fresh, setFresh] = useState<Record<string, { job: DlJob; at: number }>>({});
+  const freshRef = useRef(fresh);
+  freshRef.current = fresh;
+  /** Songs a Download press saved for good this session. */
+  const [saved, setSaved] = useState<Record<string, true>>({});
   const [format, setFormatState] = useState<DlFormat>(loadFormat);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -60,6 +71,9 @@ export function useDownloads(flash: (m: string) => void) {
     try {
       const r = await dl.jobs();
       setJobs(r.jobs);
+      // The shell's answer to a press stands in until its job shows in the list (or, if it never does, for a few seconds).
+      const now = Date.now();
+      setFresh((m) => { const keep = Object.entries(m).filter(([, f]) => !r.jobs.some((j) => j.id === f.job.id) && now - f.at < FRESH_MAX_MS); return keep.length === Object.keys(m).length ? m : Object.fromEntries(keep); });
       return r.jobs;
     } catch {
       return [] as DlJob[];
@@ -69,7 +83,9 @@ export function useDownloads(flash: (m: string) => void) {
   const poll = useCallback(() => {
     if (timer.current) clearTimeout(timer.current);
     void refresh().then((list) => {
-      if (list.some(active)) timer.current = setTimeout(poll, 1000);
+      // PLAY-RING-004: often enough that a Play button's ring follows the real percent of a short download.
+      // A press the shell has answered, whose job the list has not shown yet, is looked for again too.
+      if (list.some(active) || Object.keys(freshRef.current).length) timer.current = setTimeout(poll, 300);
     });
   }, [refresh]);
 
@@ -79,6 +95,9 @@ export function useDownloads(flash: (m: string) => void) {
       if (timer.current) clearTimeout(timer.current);
     };
   }, [poll]);
+  // RING-CLOSE-001: the shell answered a press; read its list now rather than at the next tick.
+  const awaited = Object.keys(fresh).length > 0;
+  useEffect(() => { if (awaited) poll(); }, [awaited, poll]);
 
   const setFormat = (f: DlFormat) => {
     setFormatState(f);
@@ -173,8 +192,21 @@ export function useDownloads(flash: (m: string) => void) {
   /** Songs with their own link go straight to a tool; others are matched on YouTube Music first. */
   const downloadTrack = useCallback(
     async (t: Track) => {
+      // PLAY-RING-004: from the press until the job exists (the song is being matched), the row already reads as started.
+      setStarting((m) => ({ ...m, [t.key]: true }));
       const remember = (job: DlJob | null) => {
-        if (job) setTrackJobs((m) => ({ ...m, [t.key]: job.id }));
+        if (job) {
+          // ROW-DL-KEPT-001: the link this song is saved under, so the app still knows it is saved when reopened.
+          songSources.keep(t.key, job.url);
+          setTrackJobs((m) => ({ ...m, [t.key]: job.id }));
+          // RING-CLOSE-001: the job is shown from the moment the shell answers, not from the next look at its list;
+          // in between the row read "not started" for a blink and its ring reset.
+          setFresh((m) => ({ ...m, [t.key]: { job, at: Date.now() } }));
+          // A press that saved the song (it was already held, or the cached copy was kept) stays saved in the row:
+          // the shell lists no job for it.
+          if (job.state === 'done') setSaved((m) => ({ ...m, [t.key]: true }));
+        }
+        setStarting((m) => { const { [t.key]: _gone, ...rest } = m; return rest; });
         return Boolean(job);
       };
       const label = `${t.title}${t.artists?.length ? ` — ${t.artists.join(', ')}` : ''}`;
@@ -186,12 +218,12 @@ export function useDownloads(flash: (m: string) => void) {
         const target = m.id ? matchTarget(m.id) : null;
         if (!target) {
           flash(`No confident YouTube Music match for “${t.title}”, so nothing was downloaded.`);
-          return false;
+          return remember(null);
         }
         return remember(await start(target.tool, target.url, label));
       } catch (e) {
         flash(`Could not look up “${t.title}”: ${(e as Error).message}`);
-        return false;
+        return remember(null);
       }
     },
     [start, flash],
@@ -211,7 +243,22 @@ export function useDownloads(flash: (m: string) => void) {
     [jobs, trackJobs],
   );
 
-  return { on, jobs, refresh: poll, format, setFormat, start, downloadTrack, trackState, activeCount: jobs.filter(active).length };
+  /** PLAY-LIVE-001: the job a song's Download button started, as the rows read it (state and real percent). */
+  const jobOf = useCallback(
+    (key: string): { state: string; percent: number | null } | null => {
+      const id = trackJobs[key];
+      const job = id ? jobs.find((j) => j.id === id) : undefined;
+      if (job) return { state: job.state, percent: job.percent ?? null };
+      if (saved[key]) return { state: 'done', percent: 100 };
+      // Not in the list yet (or never listed): the shell's own answer to the press.
+      const first = fresh[key];
+      if (first && first.job.id === id) return { state: first.job.state, percent: first.job.percent ?? null };
+      return starting[key] ? { state: 'queued', percent: null } : null;
+    },
+    [jobs, trackJobs, starting, fresh, saved],
+  );
+
+  return { on, jobs, refresh: poll, format, setFormat, start, downloadTrack, trackState, jobOf, activeCount: jobs.filter(active).length };
 }
 
 export type Downloads = ReturnType<typeof useDownloads>;

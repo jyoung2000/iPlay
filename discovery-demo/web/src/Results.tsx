@@ -1,4 +1,4 @@
-import { useState, type CSSProperties } from 'react';
+import { useRef, useState, type CSSProperties } from 'react';
 import { Glyph, type GlyphName } from '@now-playing/aqua-ui/icons';
 import { SimilarGlyph } from './icons';
 import { Marquee } from './Marquee';
@@ -7,7 +7,7 @@ import { ROW_COVER } from './row-cover';
 import './song-row.css';
 import type { ArtistTarget, Characteristics, FeedbackKind, PlaylistSummary, RecItem, Track } from './api';
 import type { CacheState, CardCache } from './engine/queue-controls';
-import { RowPlayButton, playOnDoubleClick } from './RowPlay';
+import { RowDownloadButton, RowPlayButton, playOnDoubleClick } from './RowPlay';
 import { Art } from './Art';
 import { matchRecordings } from './engine/identity';
 import { SaveMenu } from './SaveMenu';
@@ -85,9 +85,20 @@ interface Props {
  * diversified order; nothing here re-sorts it.
  * Arrow keys / j k move between rows; Enter plays; the row keeps focus when results refresh.
  */
-export function Results({ seeds, onRemoveSeed, onEmphasis, items, focusKey, playingKey, flags, onFocus, onPlay, onPlayTrack, onFeedback, onDownload, onSimilar, similarBusy, cacheOf, lists, onLists, onOpenAlbum, onOpenArtist }: Props) {
+export function Results({ seeds, onRemoveSeed, onEmphasis, items: liveItems, focusKey, playingKey, flags, onFocus, onPlay, onPlayTrack, onFeedback, onDownload, onSimilar, similarBusy, cacheOf, lists, onLists, onOpenAlbum, onOpenArtist }: Props) {
   /** Which row's save menu is showing, by song key. Only one opens at a time. */
   const [saving, setSaving] = useState<string | null>(null);
+  /**
+   * SAVE-MENU-STAY-001 (owner, 2026-11-23: "adding songs to playlist doesnt work"). The playlist menu lives in its
+   * song's row. Liking the song refreshes the queue a few seconds later, and when that refresh dropped or moved the
+   * row the menu vanished with it, mid-choice (measured on the emulator: gone 8 s after it opened, untouched).
+   * While a menu is open the rows are held exactly as they were when it opened — same songs, same order, each
+   * showing its newest state — and the queue catches up the moment the menu closes.
+   */
+  const held = useRef<RecItem[] | null>(null);
+  if (saving === null) held.current = null;
+  else if (!held.current) held.current = liveItems;
+  const items = held.current ? held.current.map((old) => liveItems.find((x) => x.track.key === old.track.key) ?? old) : liveItems;
   const [confirming, setConfirming] = useState<{ title: string; run: () => void } | null>(null);
 
   /**
@@ -123,7 +134,7 @@ export function Results({ seeds, onRemoveSeed, onEmphasis, items, focusKey, play
         return (
           <SwipeLi key={`seed:${s.key}`} onRemove={() => onRemoveSeed(s.key)} onSwipeLeft={onLists ? () => setSaving(s.key) : undefined} className={classNames('rec', 'rec--seed', strong && 'is-strong', playingKey === s.key && 'is-playing')} onDoubleClick={seedPlayable ? playOnDoubleClick(() => onPlayTrack(s)) : undefined}>
             <span className="rec__rank" aria-hidden="true">
-              {playingKey === s.key ? <Glyph name="speaker" size={12} /> : <Glyph name="star" size={12} />}
+              {playingKey === s.key ? <Glyph name="speaker" size={12} /> : <Glyph name="heart" size={12} />}
             </span>
             <button
               className="rec__art"
@@ -180,11 +191,7 @@ export function Results({ seeds, onRemoveSeed, onEmphasis, items, focusKey, play
               <button className="iconbtn" type="button" aria-label={`Remove ${s.title}`} title="Remove from the queue" onClick={() => onRemoveSeed(s.key)}>
                 <Glyph name="close" size={14} />
               </button>
-              {onDownload && (
-                <button className="iconbtn" type="button" onClick={() => onDownload(s)} aria-label={`Download ${s.title}`} title="Download">
-                  <Glyph name="download" size={14} />
-                </button>
-              )}
+              {onDownload && <RowDownloadButton track={s} cache={cacheOf?.(s.key)} onDownload={onDownload} />}
               {onSimilar && (
                 <button className="iconbtn rec__similar" type="button" onClick={() => onSimilar(s)} disabled={similarBusy} aria-label={`Find similar sound to ${s.title}`} title="Find similar sound">
                   <SimilarGlyph size={16} />
@@ -296,7 +303,7 @@ export function Results({ seeds, onRemoveSeed, onEmphasis, items, focusKey, play
             <div className="rec__sub">
               {seed && (
                 <span className="rec__why1 rec__why1--seed">
-                  <Glyph name="star" size={11} /> Starting song{seedStrong ? ' · counts double' : ''}
+                  <Glyph name="heart" size={11} /> Starting song{seedStrong ? ' · counts double' : ''}
                 </span>
               )}
               <span className="rec__why1">{it.reasons[0]?.text ?? 'Found from your starting songs.'}</span>
@@ -356,11 +363,7 @@ export function Results({ seeds, onRemoveSeed, onEmphasis, items, focusKey, play
               >
                 <Glyph name="close" size={14} />
               </button>
-              {onDownload && (
-                <button className="iconbtn" type="button" onClick={() => onDownload(t)} aria-label={`Download ${t.title}`} title="Download">
-                  <Glyph name="download" size={14} />
-                </button>
-              )}
+              {onDownload && <RowDownloadButton track={t} cache={cache} onDownload={onDownload} />}
               {/* SIMILAR-ICON-001: Find similar sound is an icon in the row, not a line of words. */}
               {onSimilar && (
                 <button className="iconbtn rec__similar" type="button" onClick={() => onSimilar(t)} disabled={similarBusy} aria-label={`Find similar sound to ${t.title}`} title="Find similar sound">
