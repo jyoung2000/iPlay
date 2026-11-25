@@ -301,6 +301,9 @@ export function App() {
         if (fb.taste) setTaste(fb.taste);
         setLoaded(true);
         sessionReady.current = true;
+        // A launch counts as a stop as of now until audio starts, so a process killed while idle
+        // leaves this marker, not an older one, and a quick relaunch does not reset the session.
+        writeStoppedAt(localStorage, Date.now());
         // Where the listener was when the app last stopped (RESUME-001). Restored only in the
         // installed shells, where the song is a local file: the place is useless without the audio.
         if (launchFresh) clearResume();
