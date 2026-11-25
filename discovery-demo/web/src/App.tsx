@@ -30,7 +30,7 @@ import { useQueueGenres } from './useQueueGenres';
 import { savedTracks, playbackRows, preparationTracks, contextRows, addTargetOf, addedRow, insertAfter, SEARCH_CONTEXT } from './engine/queue-context';
 import { runCarSimilar } from './engine/car-similar';
 import { captureRows, moodMovable, pinNext, placeMood, playMoodMove } from './engine/mood-apply';
-import { arrangeShuffle, heardIn, rememberStarted, restoreOrder, startedOnRecord, unionHeard } from './engine/shuffle-order';
+import { arrangeShuffle, forgetOrder, heardIn, keepOrder, keptOrder, newShuffleSeed, rememberStarted, restoreOrder, seededRand, startedOnRecord, unionHeard } from './engine/shuffle-order';
 import { MAX_ARTIST_RUN } from './engine/artist-variety';
 import { phoneWait } from './engine/native-http';
 import { favArtistsStore } from './fav-artists-store';
@@ -228,6 +228,16 @@ export function App() {
   const nextKeyRef = useRef<string | null>(null);
   // SHUFFLE-ORDER-001: the shuffled order of the songs to come, the round it belongs to, and the list's own order.
   const shuffleOrderRef = useRef<string[]>([]);
+  // WP5 (S8): the mood fits the shown order was dealt with (null: dealt before any mood answer), and the mood answer
+  // standing when the last active signal (star, dislike, Find similar) came; the next answer after it re-deals the tail.
+  const shuffleDealtFitRef = useRef<ReadonlyMap<string, number> | null>(null);
+  // WP5 (plan step 5): the seed the shown order was drawn from, kept with it, so the order can be dealt again from a
+  // bug report; and whether the order kept on this device has already been looked for this session (step 4).
+  const shuffleSeedRef = useRef<number | null>(null);
+  const shuffleKeptRead = useRef(false);
+  const activeSignalRef = useRef<{ fit: ReadonlyMap<string, number> | null } | null>(null);
+  // An active signal counts once a newer mood answer than the one standing at the signal has arrived.
+  const activeNow = (m: { fit: ReadonlyMap<string, number> } | null) => Boolean(m && activeSignalRef.current && activeSignalRef.current.fit !== m.fit);
   const [shuffleEpoch, setShuffleEpoch] = useState(0);
   const shuffleEpochDone = useRef(-1);
   const unshuffledRef = useRef<string[] | null>(null);
@@ -452,6 +462,7 @@ export function App() {
   /** Returns what it found (or why not), for a caller that is not showing the queue's status line. */
   const findSimilar = async (track: Track): Promise<string | null> => {
     if (similarRef.current) return null;
+    activeSignalRef.current = { fit: moodFitState?.fit ?? null };
     let said = '';
     const setSimilarStatus = (m: string) => { said = m; setSimilarStatusState(m); };
     similarRef.current = true; setSimilarBusy(true); setSimilarStatus(`Looking for songs that sound like “${track.title}” on all services…`);
@@ -718,11 +729,21 @@ export function App() {
   const moodListScope = moodOn && playingContext !== null && playingContext !== SEARCH_CONTEXT && shuffle;
   /** A re-rank answer keeps the songs the mood had placed where they were until the mood answers again. */
   const keepMood = (xs: RecItem[]): RecItem[] => {
-    if (discoverShuffleRef.current) return arrangeShuffle(xs, { playingKey, heard: heardNow(), order: shuffleOrderRef.current, reshuffle: false, rand: Math.random, hidden }).items;
+    if (discoverShuffleRef.current) return arrangeShuffle(xs, { playingKey, heard: heardNow(), order: shuffleOrderRef.current, reshuffle: false, rand: Math.random, hidden, recentArtists: artistRunRef.current }).items;
     if (!moodQueueScope || !moodOrderRef.current.length) return xs;
     const movable = new Set(moodMovable(xs, { currentKey: playingKey, played: playedRef.current, hidden }).map((x) => x.track.key));
     return placeMood(xs, moodOrderRef.current.filter((k) => movable.has(k)));
   };
+  // WP6 (M2, D2): when the song playing started, so the mood can ramp it over its first 45 s; re-ask the mood at 45 s.
+  // Wall-clock since the song started (a pause counts too): an approximation of the seconds heard.
+  const moodSongStart = useRef(Date.now());
+  useEffect(() => {
+    moodSongStart.current = Date.now();
+    if (!playingKey) return;
+    const t = window.setTimeout(() => nudgeMood(), 45_000);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playingKey]);
   useEffect(() => {
     if (!moodQueueScope && !moodListScope) { moodPreferRef.current = null; moodOrderRef.current = []; setMoodFitState(null); return; }
     const rows = moodQueueScope ? (result?.items ?? []) : activeItems;
@@ -732,11 +753,13 @@ export function App() {
     const keys = movable.map((x) => x.track.key);
     const shownNow = moodOrderRef.current.filter((k) => keys.includes(k));
     const timer = window.setTimeout(() => {
-      const cur = playing ? { track: playing.track, characteristics: rows.find((x) => x.track.key === playingKey)?.characteristics ?? null } : undefined;
+      const heard = Math.max(0, Math.round((Date.now() - moodSongStart.current) / 1000));
+      const cur = playing ? { track: playing.track, characteristics: rows.find((x) => x.track.key === playingKey)?.characteristics ?? null, heard } : undefined;
       // Every song the shuffle may pick from is scored too (hand-added ones, a list's songs), never moved.
       const score = activeItems.filter((x) => !keys.includes(x.track.key) && x.track.key !== playingKey && !hidden.has(x.track.key)).slice(0, 400)
         .map((x) => ({ track: x.track, characteristics: x.characteristics ?? null }));
-      api.mood({ upcoming: movable.map((x) => ({ track: x.track, characteristics: x.characteristics ?? null })), score, shown: shownNow.length ? shownNow : keys, current: cur })
+      // WP6 (M1): each row's engine score, so the mood's base term is the engine's view, not the list place.
+      api.mood({ upcoming: movable.map((x) => ({ track: x.track, characteristics: x.characteristics ?? null, score: typeof x.score === 'number' ? x.score : null })), score, shown: shownNow.length ? shownNow : keys, current: cur })
         .then((plan) => {
           if (seq !== moodSeq.current || plan.off) return;
           setMoodLead({ leading: plan.leading ?? [], confidence: plan.confidence ?? 0 });
@@ -833,21 +856,37 @@ export function App() {
     if (!discoverShuffle) {
       if (unshuffledRef.current) {
         const back = restoreOrder(result.items, unshuffledRef.current);
-        unshuffledRef.current = null; shuffleOrderRef.current = []; shuffleEpochDone.current = -1;
+        unshuffledRef.current = null; shuffleOrderRef.current = []; shuffleEpochDone.current = -1; shuffleDealtFitRef.current = null;
+        // WP5 (plan step 4): shuffle off drops the kept order; turning it on again deals a new one.
+        shuffleSeedRef.current = null; forgetOrder();
         setResult((prev) => (prev && prev.items === result.items ? { ...prev, items: back } : prev));
       }
       return;
     }
     if (!unshuffledRef.current) unshuffledRef.current = result.items.map((x) => x.track.key);
-    const reshuffle = shuffleEpochDone.current !== shuffleEpoch;
+    let reshuffle = shuffleEpochDone.current !== shuffleEpoch;
+    // WP5 (plan step 4): a restart takes up the order kept on this device for this round again, while at least 60% of
+    // its keys are still in the queue (keptOrder). Below that the queue has moved on under it, and this round deals.
+    if (reshuffle && !shuffleKeptRead.current) {
+      shuffleKeptRead.current = true;
+      const kept = keptOrder(shuffleEpoch, new Set(result.items.map((x) => x.track.key)));
+      if (kept) { shuffleOrderRef.current = kept.order; shuffleSeedRef.current = kept.seed; reshuffle = false; }
+    }
     shuffleEpochDone.current = shuffleEpoch;
+    // WP5 (plan step 5): the draw comes from a generator seeded by the number kept with the order.
+    if (reshuffle || shuffleSeedRef.current === null) shuffleSeedRef.current = newShuffleSeed();
+    const seed = shuffleSeedRef.current;
     const fit = moodOn && moodFitState ? { fit: moodFitState.fit, confidence: moodFitState.confidence, adventurous: settings?.adventurous ?? 0.5 } : null;
-    const r = arrangeShuffle(result.items, { playingKey, heard: heardNow(), order: shuffleOrderRef.current, reshuffle, rand: Math.random, mood: fit, hidden,
-      ready: (x) => canPlayHere(x.playback) && (!stepReady || stepReady(x.track)) });
+    const r = arrangeShuffle(result.items, { playingKey, heard: heardNow(), order: shuffleOrderRef.current, reshuffle, rand: seededRand(seed), mood: fit, hidden, recentArtists: artistRunRef.current,
+      ready: (x) => canPlayHere(x.playback) && (!stepReady || stepReady(x.track)), dealtFit: shuffleDealtFitRef.current, activeSignal: activeNow(fit) });
     shuffleOrderRef.current = r.order;
+    shuffleDealtFitRef.current = r.dealtFit;
+    // WP5 (plan step 4): keep the order shown (with its round and its seed) for the next start.
+    keepOrder({ order: r.order, epoch: shuffleEpoch, seed });
+    if (activeNow(fit)) activeSignalRef.current = null;
     if (r.items !== result.items) setResult((prev) => (prev && prev.items === result.items ? { ...prev, items: r.items } : prev));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [discoverShuffle, result?.items, playingKey, shuffleEpoch, readySignature, hidden, heardOnRecord]);
+  }, [discoverShuffle, result?.items, playingKey, shuffleEpoch, readySignature, hidden, heardOnRecord, moodFitState]);
   /**
    * QUEUE-ADD-001: the search row's add button puts a song into what the listener is listening to: the
    * saved list being played from, the saved list in the queue (whose songs are starting songs, so the
@@ -1155,10 +1194,10 @@ export function App() {
   // retry re-sends the SAME id and the store's dedupe actually catches it.
   const refreshTaste = () => api.feedbackState().then((r) => setTaste(r.taste ?? null), () => undefined);
 
-  const onListen = (kind: 'complete' | 'skip' | 'replay', t: Track, listened: number, meta: ListenTelemetry) => {
+  const onListen = (kind: 'complete' | 'skip' | 'partial' | 'replay', t: Track, listened: number, meta: ListenTelemetry) => {
     const sample = Boolean(result?.sample);
     // SHUFFLE-ONCE-001: heard now is heard for good, whichever list it was heard from.
-    if ((kind === 'complete' || kind === 'skip') && !heardOnRecord.has(t.key)) setHeardOnRecord((h) => new Set(h).add(t.key));
+    if ((kind === 'complete' || kind === 'skip' || kind === 'partial') && !heardOnRecord.has(t.key)) setHeardOnRecord((h) => new Set(h).add(t.key));
     const seq = ++rerankSeq.current;
     const eventId = `${kind}:${t.key.slice(0, 40)}:${meta.instance}`.slice(0, 80);
     void api
@@ -1192,7 +1231,7 @@ export function App() {
         // Listening is the other way to discover. The engine decides whether the list is actually
         // running low and answers job:null otherwise, so a finished song usually costs nothing.
         // QUEUE-KEEP-DISCOVER-001: a skipped song counts too, so skipping through the queue still keeps it growing.
-        if (sample || !result || (kind !== 'complete' && kind !== 'skip')) return;
+        if (sample || !result || (kind !== 'complete' && kind !== 'skip' && kind !== 'partial')) return;
         return api
           // When the song was started from a saved list, the engine applies that list's stricter
           // rule instead of the queue's: nothing new until everything in the list has been played.
@@ -1320,6 +1359,8 @@ export function App() {
       if (result?.sample) return;
       const seq = ++rerankSeq.current;
       // MOOD-QUEUE-001: a star or a dislike re-plans the songs to come for the mood.
+      // WP5 (S8): and is an active signal, so that next mood answer re-deals the shuffled tail.
+      if (kind === 'like' || kind === 'dislike') activeSignalRef.current = { fit: moodFitState?.fit ?? null };
       nudgeMood();
       await refreshTaste();
       if (!result) return;

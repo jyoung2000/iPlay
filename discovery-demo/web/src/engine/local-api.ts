@@ -8,7 +8,7 @@ import * as A from './audio';
 import { isSimilarityPercent, selectSimilar, soundMatch, SIMILAR_DEFAULT, SIMILAR_FLOOR, SIMILAR_LIMIT, type SoundHit, type SoundTrack } from './similar-sound';
 import { customOutcome, normaliseCriteria, runCustomDiscovery, songIdOf, type CandidateTrack, type CustomCriteria, type CustomPorts } from './custom-discovery';
 import { genreIdentity } from './genre-identity';
-import { MOOD, buildMood, moodFit, moodOrder, moodTags, type MoodCandidate, type MoodKind, type MoodSignal } from './mood-queue';
+import { MOOD, buildMood, moodFit, moodOrder, moodTags, type MoodCandidate, type MoodKind, type MoodPlanVersion, type MoodSignal } from './mood-queue';
 /** CAR-MOOD-001: the presses the car may send with a mood question. */
 const CAR_MOOD_KINDS = new Set(['like', 'dislike', 'similar', 'complete', 'skip']);
 import type { Track as NativeTrack } from './track';
@@ -16,6 +16,7 @@ import { DEFAULT_ENGINE, TRANSFER, engineWithWeights } from './config';
 import { EQ_DEFAULTS, parseEq } from './eq';
 import { PLAY_THROUGH_DEFAULT, clampPlayThrough, clampSlider } from './crossfade';
 import { appendDiscovery, needsListeningDiscovery, newDiscoveryTracks } from './discovery';
+import { carryPool, unionRelated, unionSeeds } from './pool-carry';
 import {
   PLAYLIST_TRACKS_MAX,
   PlaylistError,
@@ -67,8 +68,8 @@ import { Job, Pipeline, pmap, type Embedder } from './pipeline';
 import { FAV_ARTISTS_KEY, FAV_PER_RUN, addFav, favMap, favSeed, normaliseFav, normaliseFavs, removeFav, type FavArtist } from './fav-artists';
 import { referenceSize, sizeFit, smallScene } from './artist-size';
 import { coldReason, coldStarters, type ColdStarter } from './cold-start';
-import { artistLoad } from './artist-variety';
-import { FLOW_KEY, dryReason, flowPick, flowState, heardTest } from './queue-data-flow';
+import { artistLoad, selectNeverDry, withRecentListens } from './artist-variety';
+import { FLOW_KEY, discoveryHeardTest, dryReason, flowPick, flowState } from './queue-data-flow';
 import { SOURCE_LABELS, cleanTrack, playbackFor, round, type Dict } from './shape';
 import { AppleMusic } from './apple';
 import { Albums } from './albums';
@@ -156,7 +157,7 @@ const DEFAULT_SETTINGS = { fresh: false, adventurous: 0.5, audio: true, daily_mb
 /** How many songs one discovery run adds to the list: the user's choice in Settings. */
 export const QUEUE_SIZE_MIN = 5;
 export const QUEUE_SIZE_MAX = 60;
-const FEEDBACK_KINDS = new Set(['qualified', 'like', 'dislike', 'hide', 'save', 'replay', 'complete', 'skip', 'unlike', 'unsave', 'undislike', 'unhide']);
+const FEEDBACK_KINDS = new Set(['qualified', 'like', 'dislike', 'hide', 'save', 'replay', 'complete', 'skip', 'partial', 'unlike', 'unsave', 'undislike', 'unhide']);
 /** PLAYLIST-QUEUE-001 store keys: the list now in the queue, the queue it replaced, the seed window. */
 const QUEUE_PLAYLIST_KEY = 'queue_playlist';
 /** Songs saved lists were made with (ALBUM-OPEN-001), by key, so a list made from an album shows every song. */
@@ -1510,6 +1511,8 @@ export class LocalApi {
     if ('fresh' in body) cur['fresh'] = Boolean(body['fresh']);
     if ('adventurous' in body) cur['adventurous'] = Math.min(1, Math.max(0, Number(body['adventurous'])));
     for (const k of ['audio', 'sample_mode', 'rank_v2', 'discover_while_listening', 'mood_queue']) if (k in body) cur[k] = Boolean(body[k]);
+    // WP6: the mood plan's rollback switch ('v1' = the old order).
+    if ('mood_plan' in body) cur['mood_plan'] = body['mood_plan'] === 'v1' ? 'v1' : 'v2';
     if ('daily_mb' in body) cur['daily_mb'] = Math.min(2000, Math.max(5, Number(body['daily_mb'])));
     if ('request_mb' in body) cur['request_mb'] = Math.min(200, Math.max(2, Number(body['request_mb'])));
     if ('similar_percent' in body) {
@@ -1772,7 +1775,7 @@ export class LocalApi {
           rank: before.length + i + 1, track: cleanTrack(track), score: round(pk.score, 3), coverage: 1, tier: 'related', evidence: 'moderate',
           reasons: [{ factor: 'custom', weight: round(pk.score, 3), text: pk.reason }],
           uncertainty: [], new_release: false, factors: { custom: round(pk.score, 3) }, weights: { custom: 1 },
-          sources: [String(track['provider'])], playback: playbackFor(track), characteristics: characteristicsOf(track, taste), added: true, custom: true,
+          sources: [String(track['provider'])], playback: playbackFor(track), characteristics: characteristicsOf(track, taste), found: 'custom', custom: true,
         };
       });
       const next = this.withKnownGenres({ ...current, phase: 'final', items: [...before, ...items], count: before.length + items.length, saved_at: unixNow() });
@@ -1836,7 +1839,7 @@ export class LocalApi {
         : `${match}% calibrated sound match to “${seedTitle}” (DCLAP audio vectors).` }],
       uncertainty: [], new_release: false, factors: unmeasured ? {} : { audio: match / 100 }, weights: unmeasured ? {} : { audio: 1 },
       sources: [String(track['provider'])], playback: playbackFor(track as Dict), characteristics: characteristicsOf(track as Dict, null),
-      added: true, sound_match: unmeasured ? null : match, ...(below ? { sound_below: true } : {}), ...(unmeasured ? { sound_unmeasured: true } : {}),
+      found: 'similar', sound_match: unmeasured ? null : match, ...(below ? { sound_below: true } : {}), ...(unmeasured ? { sound_unmeasured: true } : {}),
     }));
     const next = this.withKnownGenres({ ...current, phase: 'final', items: [...previous, ...freshItems], count: previous.length + freshItems.length, saved_at: unixNow() });
     // A list replacement or cancellation in mid-search cannot be undone by this late completion.
@@ -2086,7 +2089,12 @@ export class LocalApi {
     // ARTIST-VARIETY-001: the songs by each artist already waiting in the queue, and in the last few listens, count
     // against the per-artist cap, so batch after batch cannot pile one artist up.
     const listens = this.store.feedback().filter((r) => r.kind === 'complete' || r.kind === 'skip');
-    const load = artistLoad(previous, new Set(listens.map((r) => r.key)));
+    // WP4 (A5): the load is the songs waiting PLUS the artists of the last RECENT_LISTENS listens (newest last).
+    const waiting = artistLoad(previous, new Set(listens.map((r) => r.key)));
+    const load = withRecentListens(waiting, [...listens].sort((a, b) => a.ts - b.ts));
+    // WP4 (A5) never-dry escape (QUEUE-NEVER-DRY-001): a batch that would come back with fewer than NEVER_DRY_MIN songs
+    // is chosen again without the recent listens. select() itself is unchanged.
+    const choose = (sc: Parameters<typeof E.select>[0], c: E.Context) => selectNeverDry((l) => E.select(sc, { ...c, artistLoad: l }), load, waiting);
     const limit = Number(settings['queue_size'] ?? DEFAULT_ENGINE.queueSize);
     const merge = (batch: Dict): Dict => {
       // QUEUE-ADD-001: append to the queue as it stands now, so a song the listener added while this
@@ -2100,7 +2108,8 @@ export class LocalApi {
     /** NEXT-FAV-COLD-001: filled in below once the seedless run knows its starting artists. */
     let coldUsed: ColdStarter[] = [];
     // QUEUE-DATA-FLOW-001: a top-up never offers a song the listener has already finished or skipped.
-    const heardBefore = trigger === 'listening' ? heardTest(this.store.feedback() as never) : null;
+    // WP8 / D1: a manual run ('search') leaves out songs still resting (30 days, starred 14); a top-up never re-offers a heard song.
+    const heardBefore = discoveryHeardTest(trigger, this.store.feedback() as never, unixNow());
     const unheard = (t: Dict): boolean => !heardBefore || !heardBefore(t);
     try {
       const cfg = { ...engineFromSettings(settings), queueSize: Number(settings['queue_size'] ?? DEFAULT_ENGINE.queueSize) };
@@ -2180,7 +2189,7 @@ export class LocalApi {
             seeds: seedViews as never, vectors: new Map(), relatedArtists: relMapQ, feedback: fb, impressions: imps,
             settings: es2, now: new Date(), cfg, taste, rankV2: v2, taste2, artistLoad: load,
           };
-          const quickChosen = E.select(E.scoreAll(newDiscoveryTracks(quick, held).filter(unheard) as never, ctxQ), ctxQ);
+          const quickChosen = choose(E.scoreAll(newDiscoveryTracks(quick, held).filter(unheard) as never, ctxQ), ctxQ);
           if (quickChosen.length) {
             job.result = merge(this.serialise(quickChosen, ctxQ, 'gathering', job));
             job.progress = `First ${quickChosen.length} songs found; still asking the other services`;
@@ -2241,12 +2250,12 @@ export class LocalApi {
       const relMap = new Map([...related].filter(([, v]) => v.size));
       const ctx: E.Context = { seeds: seedViews as never, vectors, relatedArtists: relMap, feedback: fb, impressions: imps, settings: es, now: new Date(), cfg, taste, rankV2: v2, taste2, artistLoad: load };
       let scored = E.scoreAll(cands as never, ctx);
-      let chosen = E.select(scored, ctx);
+      let chosen = choose(scored, ctx);
       // ARTIST-SIZE-001: the leading songs' artists are sized and the list is ranked again with their fit.
       if (sizeRef !== null) {
         job.progress = 'Matching artists of a similar size';
         const fit = await this.sizeFitFor(job, sizeRef, scored.slice(0, 60).map((x) => x.track as Dict));
-        if (fit) { ctx.artistFit = fit; scored = E.scoreAll(cands as never, ctx); chosen = E.select(scored, ctx); }
+        if (fit) { ctx.artistFit = fit; scored = E.scoreAll(cands as never, ctx); chosen = choose(scored, ctx); }
       }
       job.timings['metadata_ms'] = since();
       job.result = merge(this.serialise(chosen, ctx, 'metadata', job));
@@ -2357,20 +2366,29 @@ export class LocalApi {
       // asked for subgenres, so it was skipped. Ask again now that every song has its family.
       job.progress = 'Naming hip-hop subgenres';
       scored = E.scoreAll(cands as never, ctx);
-      chosen = E.select(scored, ctx);
+      chosen = choose(scored, ctx);
       // Ask about the songs the person will see, in ranked order, not the raw gathering order.
       const byKey = new Map(cands.map((c) => [String(c['key']), c]));
       const shown = chosen.map((x) => byKey.get(x.track.key)).filter((c): c is Dict => Boolean(c));
       await p.subgenresFromMusicBrainz(job, shown, 12);
       scored = E.scoreAll(cands as never, ctx);
-      chosen = E.select(scored, ctx);
+      chosen = choose(scored, ctx);
       job.timings['total_ms'] = since();
       job.result = merge(this.serialise(chosen, ctx, 'final', job));
       // The pool keeps every song the list holds, so a later re-rank can reorder all of them.
-      const poolCands = [...previous.map((x) => x.track), ...cands];
-      this.pool = { cands: poolCands, ctx, job };
+      // WP2 (plan 2026-11-24, A2): a carried row keeps its raw candidate (provenance, dz_id, links) from the old pool,
+      // related artists and seeds are unioned across runs, and the best non-chosen rows wait on a separate bench.
+      const oldPool = this.pool ?? this.restorePool();
+      const oldSaved = this.store.get<Dict>('last_pool');
+      const oldRows = [...(oldPool?.cands ?? []), ...(((oldSaved?.['bench'] as Dict[] | undefined) ?? []))];
+      const rankedKeys = [...scored].sort((a, b) => b.final - a.final).map((x) => x.track.key);
+      const carried = carryPool(previous as never, oldRows, chosen.map((x) => x.track.key), cands, rankedKeys, 100);
+      const poolRelated = unionRelated(relMap, oldPool?.ctx.relatedArtists ?? null);
+      const poolSeeds = unionSeeds(seedViews as Dict[], (oldPool?.ctx.seeds as unknown as Dict[] | undefined) ?? null, 40);
+      const poolCands = carried.cands;
+      this.pool = { cands: poolCands, ctx: { ...ctx, seeds: poolSeeds as never, relatedArtists: poolRelated }, job };
       await this.store.put('last_pool', {
-        cands: poolCands, seeds: seedViews, related: [...relMap].map(([k, v]) => [k, [...v]]), settings: es, weights: settings['weights'] ?? null,
+        cands: poolCands, bench: carried.bench, seeds: poolSeeds, related: [...poolRelated].map(([k, v]) => [k, [...v]]), settings: es, weights: settings['weights'] ?? null,
       });
       await this.store.put('last_result', { ...job.result, saved_at: unixNow() });
       await settleFlow(Number(((job.result as Dict | null)?.['discovery'] as Dict | undefined)?.['added'] ?? 0));
@@ -2398,8 +2416,18 @@ export class LocalApi {
     const v2 = settings['rank_v2'] !== false;
     // Re-ranking reorders the songs the list already holds and adds nothing, so the discovery limit
     // must not trim it here: a smaller limit would otherwise drop songs the listener still has.
+    // WP2 step 3: a vector made since the run (a song played to the end, a preview compared) counts in this re-rank.
+    const vectors = new Map(pool.ctx.vectors);
+    for (const sv of [...(pool.ctx.seeds as unknown as Dict[]), ...pool.cands]) {
+      const k = String(sv['key'] ?? '');
+      if (!k || vectors.has(k)) continue;
+      const did = sv['dz_preview_id'] || sv['dz_id'] || (sv['provider'] === 'deezer' ? sv['platform_id'] : null);
+      const v = this.store.vectorGet(songVectorKey(k), A.MODEL_ID, A.PREPROCESS_ID) ?? (did ? this.store.vectorGet(`deezer:${did}`, A.MODEL_ID, A.PREPROCESS_ID) : null);
+      if (v) vectors.set(k, Float64Array.from(v));
+    }
     const ctx: E.Context = {
       ...pool.ctx,
+      vectors,
       // ARTIST-VARIETY-001: the pool's own songs are the queue; counting them as already waiting would cap them out.
       artistLoad: undefined,
       // ALGO-MANAGER-001: the algorithm active NOW ranks the pool, over the run's own engine base.
@@ -2411,8 +2439,19 @@ export class LocalApi {
       taste2: v2 ? this.taste2() : null,
       now: new Date(),
     };
-    const cands = pool.cands.filter((c) => !exclude.has(String(c['key'])));
-    const chosen = E.select(E.scoreAll(cands as never, ctx), ctx);
+    // WP1 (plan 2026-11-24, A1/A4): a re-rank orders only the songs the queue holds now. Pool rows that were never
+    // chosen stay out, and every queued row comes back (orderAll has no artist cap or tier quota; WP4/M3 only spaces artists). Queue rows with no
+    // pool row are not returned; the page's mergeRerank keeps them where they are (SHUFFLE-STAY-001).
+    const stored = this.store.get<Dict>('last_result');
+    // WP1 step 4 (A8): found rows (Find similar, custom discovery; old stored rows marked added + custom/sound_match)
+    // are movable but never re-scored, so they are not candidates here; mergeRerank keeps them in place.
+    const isFound = (it: Dict) => Boolean(it['found']) || Boolean(it['custom']) || 'sound_match' in it;
+    const queued = new Set(((stored?.['items'] ?? []) as Dict[]).filter((it) => !isFound(it)).map((it) => String((it['track'] as Dict | undefined)?.['key'] ?? '')));
+    queued.delete('');
+    // No stored queue at all (an old install, or a pool restored on its own): rank the pool; the page still ignores rows
+    // it never queued. A stored queue that is empty ranks nothing.
+    const cands = pool.cands.filter((c) => (!stored || queued.has(String(c['key']))) && !exclude.has(String(c['key'])));
+    const chosen = E.orderAll(E.scoreAll(cands as never, ctx), ctx);
     const out = this.serialise(chosen, ctx, 'live', pool.job) as Dict;
     out['taste'] = tasteSummary(ctx.taste);
     out['pool'] = pool.cands.length;
@@ -2430,6 +2469,10 @@ export class LocalApi {
   }
 
   private moodLogNow: Dict[] | null = null;
+  /** WP6 (M1): the keys the mood moved in its recent plans, newest last (at most MOOD.movedKeep = 64). */
+  private moodMoved: string[] = [];
+  /** For tests: the moved keys the finished-song discount reads. */
+  moodMovedForTest(): string[] { return [...this.moodMoved]; }
   private moodLog(): Dict[] { return [...(this.moodLogNow ?? this.store.get<Dict[]>('mood_log') ?? [])]; }
 
   /**
@@ -2495,15 +2538,24 @@ export class LocalApi {
     const signals = this.moodSignals(now, tagsOf);
     const cur = body['current'] as Dict | undefined;
     const curTrack = cur?.['track'] as Dict | undefined;
-    if (curTrack?.['key']) signals.push({ key: String(curTrack['key']), kind: 'current', ts: now, tags: tagsOf(curTrack, cur?.['characteristics'] as Dict | undefined), vector: this.moodVector(curTrack) });
-    const mood = buildMood(signals, now);
+    // WP6 (M2, D2): the page sends the seconds of the song playing heard so far (`current.heard`); v2 ramps on it.
+    const heard = Number(cur?.['heard']);
+    if (curTrack?.['key']) signals.push({ key: String(curTrack['key']), kind: 'current', ts: now, tags: tagsOf(curTrack, cur?.['characteristics'] as Dict | undefined), vector: this.moodVector(curTrack), listened: Number.isFinite(heard) ? heard : 0 });
+    // WP6 (setting mood_plan, default 'v2'): 'v1' is the old order, one switch away.
+    const version: MoodPlanVersion = settings['mood_plan'] === 'v1' ? 'v1' : 'v2';
+    const mood = buildMood(signals, now, { plan: version, moved: new Set(this.moodMoved) });
     const cands: MoodCandidate[] = list.map((u) => {
       const t = u['track'] as Dict;
-      return { key: String(t['key']), tags: tagsOf(t, u['characteristics'] as Dict | undefined), vector: this.moodVector(t) };
+      const score = Number(u['score']);
+      const artists = t['artists'];
+      const artist = Array.isArray(artists) && artists.length ? String(artists[0]) : typeof t['artist'] === 'string' ? (t['artist'] as string) : '';
+      return { key: String(t['key']), tags: tagsOf(t, u['characteristics'] as Dict | undefined), vector: this.moodVector(t), artist, score: u['score'] != null && Number.isFinite(score) ? score : null };
     });
     const shown = Array.isArray(body['shown']) ? (body['shown'] as unknown[]).map(String).slice(0, 500) : undefined;
     const adventurous = Number(settings['adventurous'] ?? 0.5);
-    const plan = moodOrder(cands, mood, Number.isFinite(adventurous) ? adventurous : 0.5, { shown });
+    const plan = moodOrder(cands, mood, Number.isFinite(adventurous) ? adventurous : 0.5, { shown, version });
+    // WP6 (M1): a finished song the mood moved in a recent plan counts 1 instead of 2.
+    if (plan.changed) this.moodMoved = [...this.moodMoved.filter((k) => !plan.moved.includes(k)), ...plan.moved].slice(-MOOD.movedKeep);
     // MOOD-SHUFFLE-001: how well each song fits, for the shuffle's weighted pick. `score` adds songs that
     // may not move (hand-added, or a list played in shuffle) but are still picked from.
     const extra = (Array.isArray(body['score']) ? (body['score'] as Dict[]) : []).slice(0, 500)
@@ -2574,7 +2626,7 @@ export class LocalApi {
     const eventId = String(body['event_id'] ?? '').slice(0, 80);
     if (!eventId) return fail(400, 'event_id required (used to deduplicate)');
     const listened = body['listened'] ?? null;
-    if (['complete', 'skip', 'replay'].includes(kind) && (listened === null || !(Number(listened) >= 0 && Number(listened) <= 3600))) return fail(400, 'playback events need the listened duration');
+    if (['complete', 'skip', 'partial', 'replay'].includes(kind) && (listened === null || !(Number(listened) >= 0 && Number(listened) <= 3600))) return fail(400, 'playback events need the listened duration');
     // RADIO-TASTE-001: a radio programme is not a song; whatever reports it, nothing is learned from it.
     if (t['kind'] === 'radio-programme' && FEEDBACK_KINDS.has(kind)) return ok({ recorded: false, duplicate: false });
     const onRadio = body['medium'] === 'radio';
@@ -2582,8 +2634,10 @@ export class LocalApi {
     // stored, a late thirty-second note for the same listen is the same listen, not a second one.
     if (onRadio && kind === 'qualified' && this.store.hasFeedback(`${eventId}:full`.slice(0, 80))) return ok({ recorded: false, duplicate: true });
     // REMOVE-FOREVER-001: a like or a star (save) takes back an earlier removal, so the song may come back.
-    if (kind === 'like') this.store.removeFeedback(key, ['dislike', 'hide']);
-    if (kind === 'save') this.store.removeFeedback(key, ['hide']);
+    const takenBack = kind === 'like' ? this.store.removeFeedback(key, ['dislike', 'hide']) : kind === 'save' ? this.store.removeFeedback(key, ['hide']) : 0;
+    // REMOVE-FOREVER-001 + WP1: taking a removal back is an explicit membership change, so the song returns to the
+    // saved queue here (a re-rank itself only reorders the queue and never adds a song).
+    if (takenBack > 0) await this.restoreRemoved(String(key));
     if (kind === 'dislike') this.store.removeFeedback(key, ['like']);
     const artist = (t['artists'] as string[] | undefined)?.[0]?.toLowerCase() ?? '';
     // v2 telemetry: optional, validated, stored alongside the event (old callers simply omit it).
@@ -2620,6 +2674,18 @@ export class LocalApi {
       if (last && rest.length !== items.length) await this.store.put('last_result', { ...last, items: rest.map((x, i) => ({ ...x, rank: i + 1 })), count: rest.length });
     }
     return ok({ recorded: added, duplicate: !added });
+  }
+
+  /** Put a song whose removal was taken back into the saved queue again, from the pool, at the end. */
+  private async restoreRemoved(key: string): Promise<void> {
+    const last = this.store.get<Dict>('last_result');
+    if (!last) return;
+    const items = (last['items'] ?? []) as Dict[];
+    if (items.some((x) => String((x['track'] as Dict | undefined)?.['key']) === key)) return;
+    const cand = (this.pool ?? this.restorePool())?.cands.find((c) => String(c['key']) === key);
+    if (!cand) return;
+    const rest = [...items, { track: cleanTrack(cand as never), rank: items.length + 1, reasons: [], playback: playbackFor(cand as never) }];
+    await this.store.put('last_result', { ...last, items: rest, count: rest.length });
   }
 
   /** Import a parsed history file: pre-validated events from engine/import.ts, original timestamps kept. */
@@ -2921,7 +2987,8 @@ export class LocalApi {
   /** Every song the listener has actually finished, which is what gates a list's own discovery. */
   /** QUEUE-HEARD-001: songs the listener has heard at least once: finished or skipped, in any session. */
   private heardKeys(): Set<string> {
-    return new Set(this.store.feedback().filter((r) => r.kind === 'complete' || r.kind === 'skip').map((r) => r.key));
+    // WP3: a partial listen (Next pressed mid-song) is heard too.
+    return new Set(this.store.feedback().filter((r) => r.kind === 'complete' || r.kind === 'skip' || r.kind === 'partial').map((r) => r.key));
   }
 
   private playedKeys(): Set<string> {
