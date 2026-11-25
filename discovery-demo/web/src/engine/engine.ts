@@ -11,6 +11,7 @@ import { TASTE_WEIGHT, tasteFit, type TasteProfile } from './taste';
 import { tasteFit2, type TasteBlend } from './taste2';
 import { SEED_GUESS_SOURCE, SOUND_GUESS_SOURCE } from './infer';
 import { albumKeyOf, cleanAlbumTitle, type AlbumOf } from './album-key';
+import { tooClose } from './artist-variety';
 
 export const SEED_FACTORS = ['audio', 'genre', 'artist', 'provider', 'tempo'] as const;
 export const GLOBAL_FACTORS = ['feedback', 'freshness', 'novelty'] as const;
@@ -843,6 +844,50 @@ export function select(scored: Scored[], ctx: Context): Scored[] {
     const pa = primaryArtist(s.track);
     perArtist[pa] = (perArtist[pa] ?? 0) + 1;
     if (s.bestSeed) perSeed[s.bestSeed] = (perSeed[s.bestSeed] ?? 0) + 1;
+  }
+  return chosen;
+}
+
+/**
+ * WP1 (plan 2026-11-24, A1/A4): order EVERY scored row for a re-rank of the existing queue. Same per-pick value as
+ * `select` (final - exposure - similarity to the last six + seed balance + fresh bonus) but no tier quotas, no
+ * per-artist cap and no early exit, so a re-rank can reorder the queue without dropping any of its songs.
+ * `select` itself is untouched (golden parity).
+ */
+export function orderAll(scored: Scored[], ctx: Context): Scored[] {
+  const left = [...scored];
+  const chosen: Scored[] = [];
+  const perSeed: Record<string, number> = {};
+  const seeds = ctx.seeds.map((s) => s.key);
+  const emphOf = (s: Track) => Math.max(0.1, Number(s.emphasis ?? 1.0));
+  const emphTotal = ctx.seeds.reduce((x, s) => x + emphOf(s), 0) || 1.0;
+  const seedShare: Record<string, number> = {};
+  for (const s of ctx.seeds) seedShare[s.key] = emphOf(s) / emphTotal;
+  const lam = 0.06 + 0.06 * Math.min(1.0, 2 * ctx.settings.adventurous);
+  while (left.length) {
+    // WP4 (M3): skip a row whose primary artist is one of the last two picked while another artist is available.
+    const lastTwo = chosen.slice(-2).map((r) => primaryArtist(r.track));
+    const spaced = left.some((s) => !tooClose(lastTwo, primaryArtist(s.track), 2));
+    let bi = -1;
+    let bestVal = -Infinity;
+    for (let i = 0; i < left.length; i++) {
+      const s = left[i]!;
+      if (spaced && tooClose(lastTwo, primaryArtist(s.track), 2)) continue;
+      let val = s.final - s.exposurePenalty;
+      if (chosen.length) val -= lam * Math.max(...chosen.slice(-6).map((r) => sim(s, r, ctx.vectors)));
+      if (s.bestSeed && seeds.length > 1) {
+        const expected = (seedShare[s.bestSeed] ?? 0) * (chosen.length + 1);
+        val += 0.06 * Math.max(-1.0, Math.min(1.0, expected - (perSeed[s.bestSeed] ?? 0)));
+      }
+      if (ctx.settings.fresh && s.newRelease) val += 0.15;
+      if (bi < 0 || val > bestVal || (val === bestVal && s.track.key < left[bi]!.track.key)) {
+        bi = i;
+        bestVal = val;
+      }
+    }
+    const [s] = left.splice(bi, 1);
+    chosen.push(s!);
+    if (s!.bestSeed) perSeed[s!.bestSeed] = (perSeed[s!.bestSeed] ?? 0) + 1;
   }
   return chosen;
 }
