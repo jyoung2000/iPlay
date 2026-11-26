@@ -528,6 +528,18 @@ class EnginePlayer(
     // WP7-APPEND-001: the queue spaces them away from the same artist instead of piling them on the end.
     queue.insertSpaced(add)
     nativeChange()
+    // AA-NEXT-DRY-001: a Next press (or a song's end) that found nothing is answered by the first new song.
+    val owed = owedNextFrom
+    if (owed != null && queue.current?.song?.id == owed && !radioLive &&
+      (queue.advance(pressed = true) != null || queue.advanceFetchable(::canFetch) != null)) {
+      Log.i(TAG, "next (owed): ${owed.take(60)} -> ${queue.current?.song?.id?.take(60)} at ${queue.index}")
+      owedNextFrom = null
+      nativeChange()
+      loadCurrent(0, chosen = true)
+      holdWake(playWhenReady)
+      invalidateState(); emitSoon()
+      return add.size
+    }
     prepareNext()
     invalidateState(); emitSoon()
     return add.size
@@ -716,15 +728,21 @@ class EnginePlayer(
     val from = queue.current?.song?.id
     val heard = heardNow()
     val cued = cue?.takeIf { forward && cueFor == from }
-    val moved = when {
+    var moved = when {
       cued != null -> moveTo(cued)
       forward -> queue.advance(pressed = true) != null
       else -> queue.previous() != null
     }
+    // AA-NEXT-DRY-001: with every downloaded song of the round played, Next streams an unheard one still downloading.
+    val fetching = !moved && forward && queue.advanceFetchable(::canFetch) != null
+    if (fetching) moved = true
     if (!moved) {
       // SHUFFLE-STAY-001: say why a press found nothing, so a stalled car Next can be told from a missing file.
       if (forward) Log.i(TAG, "next: nothing to follow ${from?.take(60)} at ${queue.index} (shuffle=${queue.shuffle}, once=${queue.playsOnce}, repeat=${queue.repeat}) " +
         queue.items.joinToString { "${it.song.id.take(40)}[r=${it.song.ready},h=${it.song.heard},s=${it.song.source != null}]" })
+      // AA-NEXT-DRY-001: nothing unheard is left at all. Find more for the listening mood; the first found song is
+      // this press's answer (appendFound moves on to it), so Next is never silently dead.
+      if (forward) { owedNextFrom = from; onQueueDry?.invoke() }
       if (!forward) pageSeek(0)
       return
     }
@@ -732,8 +750,19 @@ class EnginePlayer(
     Log.i(TAG, "${if (forward) "next" else "prev"}: ${from?.take(60)} -> ${queue.current?.song?.id?.take(60)} at ${queue.index} (shuffle=${queue.shuffle}, mediaIndex=$lastSeekIndex)")
     nativeChange()
     log(if (forward) "next" else "prev", heard)
-    loadCurrent(0, chosen = false)
+    loadCurrent(0, chosen = fetching)
   }
+
+  /** AA-NEXT-DRY-001: a song can still be had (streamed while its file downloads), not only one already on the phone. */
+  private fun canFetch(e: Entry): Boolean = e.song.source != null
+
+  /**
+   * AA-NEXT-DRY-001: the song a Next press (or a song's end) found nothing after. When songs are appended while it is
+   * still the song current, the queue moves on to them. Cleared by any other change of song.
+   */
+  private var owedNextFrom: String? = null
+  /** AA-NEXT-DRY-001: the queue has nothing unheard left; the service starts a mood top-up. Main thread. */
+  var onQueueDry: (() -> Unit)? = null
 
   /**
    * CAR-X-001 (owner, 2026-11-24: "ensure the X button works on android auto"): the car's X took song [id] out while it
@@ -812,6 +841,7 @@ class EnginePlayer(
    * picked this song, so if its file is not here yet it waits; otherwise it is skipped.
    */
   private fun loadCurrent(startMs: Long, chosen: Boolean) {
+    if (queue.current?.song?.id != owedNextFrom) owedNextFrom = null
     val entry = queue.current ?: run { invalidateState(); emit(null); return }
     val song = entry.song
     val gen = ++loadGeneration
@@ -941,21 +971,26 @@ class EnginePlayer(
   private fun songEnded(key: String, heard: AudioEngine.Heard) {
     if (queue.current?.song?.id != key) return
     val next = upcoming()
-    val moved = when {
+    var moved = when {
       next != null -> moveTo(next)
       pageLive -> false // the page decides what follows (it may still be fetching it)
       else -> queue.advance(pressed = false) != null
     }
+    // AA-NEXT-DRY-001: the round's downloaded songs are used up; an unheard one still downloading plays from its source.
+    val fetching = !moved && !pageLive && !queue.repeatsSong && queue.advanceFetchable(::canFetch) != null
+    if (fetching) moved = true
     if (!moved) {
       ended = true
       holdWake(false)
       invalidateState()
       log("end", heard, advanced = false)
+      // AA-NEXT-DRY-001: a shuffled queue with nothing unheard left finds more for the mood and carries on with them.
+      if (!pageLive && queue.shuffle && !queue.repeatsSong) { owedNextFrom = key; onQueueDry?.invoke() }
       return
     }
     nativeChange()
     log("end", heard)
-    loadCurrent(0, chosen = false)
+    loadCurrent(0, chosen = fetching)
   }
 
   private fun blendPromoted(key: String, outgoing: AudioEngine.Heard) {

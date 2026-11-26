@@ -297,6 +297,28 @@ class PlayQueue<T>(
   }
 
   /**
+   * AA-NEXT-DRY-001 (owner, 2026-11-26: "after a while the skip/forward button stops working"): [advance] only takes
+   * songs whose whole file is on the phone, so once every downloaded song of a shuffled round had played, Next did
+   * nothing even with unheard songs (a queue top-up, mood or similar finds) still downloading. This makes the first
+   * such song current instead: unheard this round under shuffle, ahead of the current one in order mode. Never a song
+   * already played this round. Returns its index, or null when no song [canFetch] is left.
+   */
+  fun advanceFetchable(canFetch: (T) -> Boolean): Int? {
+    if (items.isEmpty()) return null
+    val ahead = if (shuffle) order.filter { it != index && !playedThisRound(it) }
+      else order.indexOf(index).let { pos -> (pos + 1 until order.size).map { order[it] } }
+    val open = ahead.filter { it in items.indices && canFetch(items[it]) }
+    val run = if (once) runArtist() else ""
+    val i = open.firstOrNull { run.isEmpty() || artistKey(artistOf(items[it])) != run } ?: open.firstOrNull() ?: return null
+    if (i != index && (repeat == Repeat.ONCE || repeat == Repeat.TWICE)) repeat = Repeat.OFF
+    index = i
+    played(i)
+    version++
+    heard += identityOf(items[i])
+    return i
+  }
+
+  /**
    * CAR-X-001 (owner, 2026-11-24: "ensure the X button works on android auto"): take the song playing ([key]) out of the
    * queue and make another current: the one Next would play, else the first playable one after it in the list
    * (wrapping), never one [avoid] turns down nor, when the list plays once, one already heard. Returns the new index,

@@ -93,6 +93,38 @@ class CarScrubTest {
     assertTrue(skips.isEmpty())
   }
 
+  // AA-NEXT-DRY-001: a key-up the car never sent must not leave Next dead or a scrub running.
+  @Test fun aLostKeyUpDuringAScrubDoesNotSwallowTheNextTap() {
+    scrub.key(CarScrub.Key.NEXT, down = true)
+    advance(1_000)
+    assertTrue(scrub.isScrubbing)
+    // No key-up arrives. Seconds later the driver taps Next again.
+    advance(5_000)
+    scrub.key(CarScrub.Key.NEXT, down = true)
+    assertFalse("the lost hold's scrub ends", scrub.isScrubbing)
+    advance(100)
+    scrub.key(CarScrub.Key.NEXT, down = false)
+    assertEquals("the tap skips", listOf(true), skips)
+  }
+
+  @Test fun aLostKeyUpAfterAScrubStoppedAtTheEndDoesNotSwallowTheNextTap() {
+    pos = 196_000
+    scrub.key(CarScrub.Key.NEXT, down = true)
+    advance(5_000)
+    assertFalse(scrub.isScrubbing)
+    advance(3_000)
+    scrub.key(CarScrub.Key.NEXT, down = true); advance(100); scrub.key(CarScrub.Key.NEXT, down = false)
+    assertEquals(listOf(true), skips)
+  }
+
+  @Test fun aCarResendingDownsWhileHeldStillScrubsAndDoesNotSkip() {
+    scrub.key(CarScrub.Key.NEXT, down = true)
+    for (i in 1..8) { advance(200); scrub.key(CarScrub.Key.NEXT, down = true) }
+    assertTrue(scrub.isScrubbing)
+    scrub.key(CarScrub.Key.NEXT, down = false)
+    assertTrue(skips.isEmpty())
+  }
+
   @Test fun aForwardScrubStopsJustBeforeTheEnd() {
     pos = 198_000
     scrub.key(CarScrub.Key.FAST_FORWARD, down = true)

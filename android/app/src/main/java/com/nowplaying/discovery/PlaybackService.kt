@@ -265,6 +265,11 @@ class PlaybackService : MediaLibraryService() {
     player.addListener(carButtonListener)
     // A counted replay maps to the platform's "repeat off", so no player event announces it.
     player.onRepeatSelectionChanged = { refreshCarButtons() }
+    // AA-NEXT-DRY-001: Next (or a song's end) found nothing unheard left: find more for the listening mood; the
+    // engine moves on to the first song found. A second press while that runs is answered, not dropped.
+    player.onQueueDry = {
+      mainHandler.post { if (moodDiscoverBusy) tellDriver("Still finding more songs for your mood\u2026") else startMoodDiscover() }
+    }
     // VOLUME-BOOST-001: the car's Volume button follows the phone's slider too.
     EngineHub.onCarLabels = { refreshCarButtons(); mainHandler.post { for ((id, n) in listOf(CarSettings.ROOT to 3, CarSettings.EQ to CarSettings.PRESETS.size + 1, CarSettings.DISCOVERY to CarSettings.LEVELS.size, FOLDER_PLAYLISTS to 8)) session?.notifyChildrenChanged(id, n, null) } }
     RadioCatalog.addListener(radioListener)

@@ -29,6 +29,8 @@ class CarScrub(
   private var dir = 1
   private var fromMs = 0L
   private var startedAt = 0L
+  /** When the held key last sent a down event (AA-NEXT-DRY-001: tells a lost key-up from a repeated down). */
+  private var lastDownAt = 0L
 
   val isScrubbing: Boolean get() = scrubbing
 
@@ -39,12 +41,18 @@ class CarScrub(
       if (key == Key.FAST_FORWARD || key == Key.REWIND) { held = key; if (!scrubbing) start(forward); return true }
       if (repeat > 0 || longPress) {
         held = key
+        lastDownAt = now()
         clearHold()
         if (!scrubbing && !scrubbed) start(forward)
         return true
       }
-      if (held == key && (holdTimer != null || scrubbing || scrubbed)) return true
+      // A fresh down soon after the last one is the same press (some cars resend it). One long after means the car
+      // never sent the last key-up: before AA-NEXT-DRY-001 that press was swallowed (and a scrub left running), so
+      // Next seemed to stop working. It starts a new press instead.
+      if (held == key && (holdTimer != null || scrubbing || scrubbed) && now() - lastDownAt < STALE_DOWN_MS) { lastDownAt = now(); return true }
+      if (scrubbing) stop()
       held = key
+      lastDownAt = now()
       scrubbed = false
       clearHold()
       holdTimer = later(HOLD_MS) { holdTimer = null; if (held == key && !scrubbing) start(forward) }
@@ -100,5 +108,7 @@ class CarScrub(
     /** A forward scrub stops this far before the end, so it never runs the song out by itself. */
     const val END_GAP_MS = 1500L
     const val MAX_MS = 120_000L
+    /** A fresh down this long after the held key's last down is a new press (its key-up was lost). */
+    const val STALE_DOWN_MS = 1_000L
   }
 }
