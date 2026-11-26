@@ -291,7 +291,7 @@ export function SettingsView({ settings, onSettings, onReset, onResetTaste, onFo
           <label className="discovery-settings__field">
             <span>Longest run of one genre</span>
             <select
-              value={settings?.genre_run_limit ?? 5}
+              value={settings?.genre_run_limit ?? 8}
               disabled={settings?.mood_queue === false}
               aria-describedby="genre-run-help"
               onChange={(e) => onSettings({ genre_run_limit: Number(e.target.value) })}

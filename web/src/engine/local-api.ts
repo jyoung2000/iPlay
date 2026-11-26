@@ -155,7 +155,7 @@ const MOOD_DISCOVERY_AT = 'mood_discovery_at';
 const MOOD_DISCOVERY_EVERY_S = 600;
 /** AA-TOPUP-60-001: the distinct-first-play count at the last 60% top-up; a top-up needs a new first play after it. */
 const TOPUP_HEARD_AT = 'topup_heard_at';
-const DEFAULT_SETTINGS = { fresh: false, adventurous: 0.5, audio: true, daily_mb: TRANSFER.daily / 1e6, request_mb: TRANSFER.perRequest / 1e6, sample_mode: false, queue_size: DEFAULT_ENGINE.queueSize, similar_percent: SIMILAR_DEFAULT, cache_gb: 1, dl_parallel: 0, preload_target: 'all' as 'all' | 'count', preload_count: 20, discover_while_listening: true, mood_queue: true, mood_lead: true, genre_run_limit: 5, rank_v2: true, eq: EQ_DEFAULTS, mix: 0, local_mix: true, play_through: PLAY_THROUGH_DEFAULT };
+const DEFAULT_SETTINGS = { fresh: false, adventurous: 1.0, audio: true, daily_mb: TRANSFER.daily / 1e6, request_mb: TRANSFER.perRequest / 1e6, sample_mode: false, queue_size: DEFAULT_ENGINE.queueSize, similar_percent: SIMILAR_DEFAULT, cache_gb: 1, dl_parallel: 0, preload_target: 'all' as 'all' | 'count', preload_count: 20, discover_while_listening: true, mood_queue: true, mood_lead: true, genre_run_limit: 8, rank_v2: true, eq: EQ_DEFAULTS, mix: 0, local_mix: true, play_through: PLAY_THROUGH_DEFAULT };
 /** How many songs one discovery run adds to the list: the user's choice in Settings. */
 export const QUEUE_SIZE_MIN = 5;
 export const QUEUE_SIZE_MAX = 60;
@@ -1517,7 +1517,7 @@ export class LocalApi {
     if ('mood_plan' in body) cur['mood_plan'] = body['mood_plan'] === 'v1' ? 'v1' : 'v2';
     // 0.20.19: mood lead (on by default) and the same-genre run limit from row 13 on (0 = off; 3, 5 or 8).
     if ('mood_lead' in body) cur['mood_lead'] = Boolean(body['mood_lead']);
-    if ('genre_run_limit' in body) { const n = Number(body['genre_run_limit']); cur['genre_run_limit'] = [0, 3, 5, 8].includes(n) ? n : 5; }
+    if ('genre_run_limit' in body) { const n = Number(body['genre_run_limit']); cur['genre_run_limit'] = [0, 3, 5, 8].includes(n) ? n : 8; }
     if ('daily_mb' in body) cur['daily_mb'] = Math.min(2000, Math.max(5, Number(body['daily_mb'])));
     if ('request_mb' in body) cur['request_mb'] = Math.min(200, Math.max(2, Number(body['request_mb'])));
     if ('similar_percent' in body) {
@@ -2063,7 +2063,7 @@ export class LocalApi {
     if (mood.confidence < 0.5) return null;
     const left = items.filter((x) => x?.track?.['key'] && !played.has(String(x.track['key'])));
     const { fit } = moodFit(left.map((x) => ({ key: String(x.track['key']), tags: tagsOf(x.track), vector: this.moodVector(x.track) })), mood);
-    const a = Number(settings['adventurous'] ?? 0.5);
+    const a = Number(settings['adventurous'] ?? 1.0);
     const bar = 0.65 - 0.3 * Math.max(0, Math.min(1, Number.isFinite(a) ? a : 0.5));
     if (left.filter((x) => (fit[String(x.track['key'])] ?? 0) >= bar).length >= MOOD.lead) return null;
     const seeds = this.moodSeedRows(now);
@@ -2610,12 +2610,12 @@ export class LocalApi {
       return { key: String(t['key']), tags: tagsOf(t, u['characteristics'] as Dict | undefined), vector: this.moodVector(t), artist, score: u['score'] != null && Number.isFinite(score) ? score : null };
     });
     const shown = Array.isArray(body['shown']) ? (body['shown'] as unknown[]).map(String).slice(0, 500) : undefined;
-    const adventurous = Number(settings['adventurous'] ?? 0.5);
+    const adventurous = Number(settings['adventurous'] ?? 1.0);
     // 0.20.19: mood lead first, then the run cap from row 13 on (see mood-queue.ts moodOrderV2).
     const lead = settings['mood_lead'] !== false;
     const rl = Number(settings['genre_run_limit']);
-    const runLimit = Number.isFinite(rl) ? rl : 5;
-    const plan = moodOrder(cands, mood, Number.isFinite(adventurous) ? adventurous : 0.5, { shown, version, lead, runLimit });
+    const runLimit = Number.isFinite(rl) ? rl : 8;
+    const plan = moodOrder(cands, mood, Number.isFinite(adventurous) ? adventurous : 1.0, { shown, version, lead, runLimit });
     // WP6 (M1): a finished song the mood moved in a recent plan counts 1 instead of 2.
     if (plan.changed) this.moodMoved = [...this.moodMoved.filter((k) => !plan.moved.includes(k)), ...plan.moved].slice(-MOOD.movedKeep);
     // MOOD-SHUFFLE-001: how well each song fits, for the shuffle's weighted pick. `score` adds songs that

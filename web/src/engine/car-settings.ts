@@ -24,6 +24,6 @@ export async function applyCarSettings(change: CarSettingsChange, ports: CarSett
 /** The discovery settings the engine should know, from the phone's settings (null before they load). */
 export function discoveryForEngine(s: { adventurous?: number; mood_queue?: boolean } | null | undefined): { op: 'settings'; adventurous: number; mood_queue: boolean } | null {
   if (!s) return null;
-  const a = typeof s.adventurous === 'number' && Number.isFinite(s.adventurous) ? Math.min(1, Math.max(0, s.adventurous)) : 0.5;
+  const a = typeof s.adventurous === 'number' && Number.isFinite(s.adventurous) ? Math.min(1, Math.max(0, s.adventurous)) : 1.0;
   return { op: 'settings', adventurous: a, mood_queue: s.mood_queue !== false };
 }

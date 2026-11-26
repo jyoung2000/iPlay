@@ -73,6 +73,6 @@ describe('algorithm settings in the engine (ALGO-MANAGER-001)', () => {
       expect(r.status, JSON.stringify(body).slice(0, 80)).toBe(400);
       expect(String((r.body as { detail: string }).detail)).toMatch(/[A-Z]/);
     }
-    expect(await get(api)).toMatchObject({ adventurous: 0.5, algorithms: [], active_algorithm: BUILT_IN_ID });
+    expect(await get(api)).toMatchObject({ adventurous: 1.0, algorithms: [], active_algorithm: BUILT_IN_ID });
   });
 });

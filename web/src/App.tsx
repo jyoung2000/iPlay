@@ -819,7 +819,7 @@ export function App() {
   // must obey local readiness even in a search list (SHUFFLE-ROUND-001).
   const stepReady = playingContext === SEARCH_CONTEXT && !shuffle ? undefined : ready;
   // MOOD-QUEUE-001: with shuffle on, the next song is picked from the few that fit the mood best.
-  const moodShuffle = moodOn && shuffle && moodFitState ? { fit: moodFitState.fit, confidence: moodFitState.confidence, adventurous: settings?.adventurous ?? 0.5 } : null;
+  const moodShuffle = moodOn && shuffle && moodFitState ? { fit: moodFitState.fit, confidence: moodFitState.confidence, adventurous: settings?.adventurous ?? 1.0 } : null;
   // SHUFFLE-ORDER-001: in the Discover queue the shuffled order is in the list itself, and playback walks it.
   const discoverShuffle = shuffle && playingContext === null && !result?.sample;
   discoverShuffleRef.current = discoverShuffle;
@@ -897,7 +897,7 @@ export function App() {
     // WP5 (plan step 5): the draw comes from a generator seeded by the number kept with the order.
     if (reshuffle || shuffleSeedRef.current === null) shuffleSeedRef.current = newShuffleSeed();
     const seed = shuffleSeedRef.current;
-    const fit = moodOn && moodFitState ? { fit: moodFitState.fit, confidence: moodFitState.confidence, adventurous: settings?.adventurous ?? 0.5 } : null;
+    const fit = moodOn && moodFitState ? { fit: moodFitState.fit, confidence: moodFitState.confidence, adventurous: settings?.adventurous ?? 1.0 } : null;
     const r = arrangeShuffle(result.items, { playingKey, heard: heardNow(), order: shuffleOrderRef.current, reshuffle, rand: seededRand(seed), mood: fit, hidden, recentArtists: artistRunRef.current,
       ready: (x) => canPlayHere(x.playback) && (!stepReady || stepReady(x.track)), dealtFit: shuffleDealtFitRef.current, activeSignal: activeNow(fit) });
     shuffleOrderRef.current = r.order;
@@ -1500,7 +1500,7 @@ export function App() {
     void api.health(true).catch(() => undefined).then(() => run(true));
   };
   const sample = Boolean(result?.sample);
-  const adventurous = settings?.adventurous ?? 0.5;
+  const adventurous = settings?.adventurous ?? 1.0;
   const fresh = settings?.fresh ?? false;
   const queueSize = settings?.queue_size ?? 20;
   // DISCOVER-TIDY-002 (owner): with custom discovery chosen, Find needs no starting song; it runs those choices.
