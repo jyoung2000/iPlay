@@ -709,6 +709,8 @@ class EnginePlayer(
   /* -------------------------------------------------------------- transport */
 
   private fun changePlayWhenReady(play: Boolean) {
+    // AA-NEXT-DRY-001: a pause cancels a Next that was waiting for songs; nothing starts on its own later.
+    if (!play) owedNextFrom = null
     if (play && !requestFocus()) return
     // Car, lock-screen, focus and noisy-device controls share the phone radio pause state.
     if (radioLive) com.nowplaying.discovery.RadioNative.session?.paused = !play
@@ -742,7 +744,7 @@ class EnginePlayer(
         queue.items.joinToString { "${it.song.id.take(40)}[r=${it.song.ready},h=${it.song.heard},s=${it.song.source != null}]" })
       // AA-NEXT-DRY-001: nothing unheard is left at all. Find more for the listening mood; the first found song is
       // this press's answer (appendFound moves on to it), so Next is never silently dead.
-      if (forward) { owedNextFrom = from; onQueueDry?.invoke() }
+      if (forward && onQueueDry != null) { owedNextFrom = from; onQueueDry?.invoke() }
       if (!forward) pageSeek(0)
       return
     }
@@ -985,7 +987,7 @@ class EnginePlayer(
       invalidateState()
       log("end", heard, advanced = false)
       // AA-NEXT-DRY-001: a shuffled queue with nothing unheard left finds more for the mood and carries on with them.
-      if (!pageLive && queue.shuffle && !queue.repeatsSong) { owedNextFrom = key; onQueueDry?.invoke() }
+      if (!pageLive && queue.shuffle && !queue.repeatsSong && onQueueDry != null) { owedNextFrom = key; onQueueDry?.invoke() }
       return
     }
     nativeChange()
