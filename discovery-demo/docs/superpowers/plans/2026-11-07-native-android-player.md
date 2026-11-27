@@ -8,7 +8,7 @@
 
 **Tech Stack:** Kotlin, Media3 1.9.3 ExoPlayer/session/common, Android foreground MediaLibraryService, existing Downloads cache/bridge, React/TypeScript, Vitest + connected Android tests.
 
-**Spec:** Owner's attached 2026-11-06 Android media-player research (composer-pastes/pasted_content_2026-11-07_03-14-37-420_d9a381.txt), 2026-11-07 choice of native service-owned engine with ported EQ/crossfade/mixer and measured parity; checkpoint `C:/Users/jalon/AppData/Local/hermes/task-checkpoints/discovery-demo-android-auto.md`.
+**Spec:** Owner's attached 2026-11-06 Android media-player research (composer-pastes/pasted_content_2026-11-07_03-14-37-420_d9a381.txt), 2026-11-07 choice of native service-owned engine with ported EQ/crossfade/mixer and measured parity; checkpoint `<task-checkpoints>/discovery-demo-android-auto.md`.
 
 ## Global Constraints
 - No previews, alternate recordings or Deezer-only unavailable tracks in playable lists. Preserve exact recording identity and locally verified complete audio.
@@ -76,7 +76,7 @@
 ### Task 6: Release and actual Android Auto proof
 **Files:** version bump (`android/app/build.gradle.kts`), docs, tests.
 - [ ] Run full web, Android unit/instrumented and Windows parity gates; package signed APK and verify signature/version/asset parity.
-- [x] Unblock DHU transport: isolated official Google Play API34 AVD emulator-5560 with Google-signed Android Auto 17.9.664044, no account login. Actual projected dashboard, Airwave launcher, Song list/Playlists tabs and host Search keyboard exercised. Setup/evidence: `C:/Users/jalon/AppData/Local/hermes/testing/dhu/README.md`.
+- [x] Unblock DHU transport: isolated official Google Play API34 AVD emulator-5560 with Google-signed Android Auto 17.9.664044, no account login. Actual projected dashboard, Airwave launcher, Song list/Playlists tabs and host Search keyboard exercised. Setup/evidence: `<test-artifacts>/dhu/README.md`.
 - [ ] Test real song playback, queue/transport, voice results, buffering, cold start/task removal and narrow/wide car layouts in the now-working DHU. Empty-library UI smoke does not prove these behaviors.
 - [ ] Fresh independent code review, fix important findings RED→GREEN, commit and fast-forward push only after real playback acceptance gates; never overwrite prior delivered APKs.
 

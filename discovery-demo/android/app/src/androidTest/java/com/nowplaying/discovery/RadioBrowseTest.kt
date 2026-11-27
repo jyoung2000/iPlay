@@ -35,6 +35,20 @@ class RadioBrowseTest {
     error.get()?.let { throw it }
     return result.get()
   }
+  @Test fun radioCategoryRowsCarrySemanticEmbeddedArtwork() {
+    val browser = await { MediaBrowser.Builder(ctx, SessionToken(ctx, ComponentName(ctx, PlaybackService::class.java))).buildAsync() }
+    try {
+      val categories = await { browser.getChildren("radio", 0, 10, null) }.value!!
+      assertEquals(listOf(RadioCatalog.FAVOURITES, CarRadioFilters.stations(0), CarRadioFilters.FILTERS, RadioCatalog.ALL, RadioCatalog.SEARCH), categories.map { it.mediaId })
+      val art = listOf(R.drawable.car_station_fav, R.drawable.car_radio, R.drawable.car_filter, R.drawable.car_alphabet, R.drawable.car_search)
+      for ((item, resId) in categories.zip(art)) {
+        val md = item.mediaMetadata
+        assertNull("host must not have to fetch app-owned artwork", md.artworkUri)
+        assertArrayEquals("${md.title} has the wrong/placeholder artwork", CarArt.bytes(ctx, resId), md.artworkData)
+      }
+    } finally { instr.runOnMainSync { browser.release() } }
+  }
+
   @Test fun stationMediaIdsBypassBothPageCommandsAndSongLookup() {
     // Invalid UUID fails in the catalogue before any stream, decoder, or Activity can start.
     // Without the interception, the live page gets playId or native song lookup consumes the id.
@@ -96,13 +110,17 @@ class RadioBrowseTest {
       val tabs = await { browser.getChildren(root.mediaId, 0, 10, null) }.value!!
       assertEquals(listOf("songs", "playlists", "radio", "search"), tabs.map { it.mediaId })
       val children = await { browser.getChildren("radio", 0, 10, null) }.value!!
-      assertEquals(listOf("radio/favourites", "radio/all", "radio/search"), children.map { it.mediaId })
-      assertEquals("All stations", children[1].mediaMetadata.title.toString())
+      assertEquals(listOf("radio/favourites", "radio/filtered/0", "radio/filters", "radio/all", "radio/search"), children.map { it.mediaId })
+      assertEquals("Filtered stations", children[1].mediaMetadata.title.toString())
+      assertEquals("Radio filters", children[2].mediaMetadata.title.toString())
+      assertEquals("All stations", children[3].mediaMetadata.title.toString())
       val letters = await { browser.getChildren("radio/all", 0, 40, null) }.value!!
-      assertEquals(28, letters.size); assertTrue(letters.any { it.mediaId == "radio/letter/A/0" }); assertTrue(letters.any { it.mediaId == "radio/letter/Z/0" }); assertTrue(letters.any { it.mediaId == "radio/letter/#/0" })
+      assertEquals(29, letters.size); assertTrue(letters.any { it.mediaId == "radio/letter/A/0" }); assertTrue(letters.any { it.mediaId == "radio/letter/Z/0" }); assertTrue(letters.any { it.mediaId == "radio/letter/#/0" }); assertTrue(letters.any { it.mediaId == RadioCatalog.NUMBERS_FOLDER })
       assertEquals("A", await { browser.getItem("radio/letter/A/0") }.value!!.mediaMetadata.title.toString())
-      val digits = await { browser.getChildren("radio/letter/#/0", 0, 20, null) }.value!!
+      val digits = await { browser.getChildren(RadioCatalog.NUMBERS_FOLDER, 0, 20, null) }.value!!
       assertEquals((0..9).map { "radio/letter/$it/0" }, digits.map { it.mediaId })
+      val otherNames = await { browser.getChildren("radio/letter/#/0", 0, 20, null) }.value!!
+      assertTrue(otherNames.all { it.mediaId.startsWith("radio/station/") })
       assertEquals("1", await { browser.getItem("radio/letter/1/0") }.value!!.mediaMetadata.title.toString())
       assertNotEquals(0, await { browser.getChildren("radio/letter/AA/0", 0, 10, null) }.resultCode)
       val favourites = await { browser.getChildren("radio/favourites", 0, 10, null) }.value!!

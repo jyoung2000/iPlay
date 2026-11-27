@@ -1,7 +1,9 @@
 import { downloadsAvailable } from './engine/downloads';
+import { rowArtist, runArtist } from './engine/artist-variety';
 import { familyIdentity, genreIdentity, subIdentity, type GenreIdentity } from './engine/genre-identity';
 import { styleCore } from './engine/genre-fill';
 import { moodShufflePick, type ShuffleMood } from './engine/mood-shuffle';
+import { isPinned } from './engine/mood-apply';
 import type { Characteristics, Playback, ProviderId, RecItem, Release, TasteSummary, Track } from './api';
 
 export const PROVIDER_LABEL: Record<string, string> = {
@@ -173,7 +175,11 @@ export function stepQueue(
   fromKey: string | null,
   dir: 1 | -1,
   hidden: Set<string>,
-  o: { shuffle: boolean; repeat: RepeatMode; heard: ReadonlySet<string>; rand?: () => number; ready?: (track: Track) => boolean; prefer?: ReadonlyMap<string, number>; mood?: ShuffleMood | null },
+  o: {
+    shuffle: boolean; repeat: RepeatMode; heard: ReadonlySet<string>; rand?: () => number; ready?: (track: Track) => boolean; prefer?: ReadonlyMap<string, number>; mood?: ShuffleMood | null; inOrder?: boolean;
+    /** ARTIST-RUN-001: artist credits of the songs played, oldest first (the Discover queue's shuffle only). */
+    recentArtists?: readonly string[];
+  },
 ): QueueStep | null {
   const playable = items.filter((x) => !hidden.has(x.track.key) && canPlayHere(x.playback));
   /**
@@ -192,14 +198,25 @@ export function stepQueue(
   // `prefer` (the mood plan's order, top three) is the older rule, kept for callers without fits.
   const best = (from: RecItem[]) => (o.prefer ? [...from].sort((a, b) => (o.prefer!.get(a.track.key) ?? 1e9) - (o.prefer!.get(b.track.key) ?? 1e9)).slice(0, 3) : from);
   const pick = (all: RecItem[]) => {
+    // SHUFFLE-ORDER-001: the queue already holds the shuffled order; play the first song it shows.
+    if (o.inOrder) return all[0]!;
     if (o.mood && o.mood.confidence > 0) return moodShufflePick(all, (x) => x.track.key, o.mood.fit, { adventurous: o.mood.adventurous, confidence: o.mood.confidence, rand });
     const from = best(all);
     return from[Math.min(from.length - 1, Math.floor(rand() * from.length))]!;
   };
+  // ARTIST-RUN-001: after MAX_ARTIST_RUN songs in a row by one artist, the shuffle's next song is by another one
+  // whenever the list holds one to choose.
+  const run = o.shuffle && o.recentArtists ? runArtist(o.recentArtists) : '';
+  const breakRun = (xs: RecItem[]) => {
+    if (!run) return xs;
+    const others = xs.filter((x) => rowArtist(x.track) !== run);
+    return others.length ? others : xs;
+  };
   if (o.shuffle && dir === 1) {
-    const fresh = choosable.filter((x) => x.track.key !== fromKey && !o.heard.has(x.track.key));
+    const fresh = breakRun(choosable.filter((x) => x.track.key !== fromKey && !o.heard.has(x.track.key)));
     if (fresh.length) {
-      const kept = shuffleNext && shuffleNext.from === fromKey && shuffleNext.heard === o.heard && !shuffleNext.wrapped ? fresh.find((x) => x.track.key === shuffleNext!.key) : undefined;
+      // SHUFFLE-ORDER-001: in queue order the list IS the decision; a pick remembered from before must not override it.
+      const kept = !o.inOrder && shuffleNext && shuffleNext.from === fromKey && shuffleNext.heard === o.heard && !shuffleNext.wrapped ? fresh.find((x) => x.track.key === shuffleNext!.key) : undefined;
       const item = kept ?? pick(fresh);
       shuffleNext = { from: fromKey, key: item.track.key, heard: o.heard, wrapped: false };
       return { item, wrapped: false };
@@ -207,8 +224,8 @@ export function stepQueue(
     if (o.repeat !== 'all') return null;
     const others = choosable.filter((x) => x.track.key !== fromKey);
     if (!others.length && !choosable.length) return null;
-    const pool = others.length ? others : choosable;
-    const kept = shuffleNext && shuffleNext.from === fromKey && shuffleNext.heard === o.heard && shuffleNext.wrapped ? pool.find(x => x.track.key === shuffleNext!.key) : undefined;
+    const pool = breakRun(others.length ? others : choosable);
+    const kept = !o.inOrder && shuffleNext && shuffleNext.from === fromKey && shuffleNext.heard === o.heard && shuffleNext.wrapped ? pool.find(x => x.track.key === shuffleNext!.key) : undefined;
     const item = kept ?? pick(pool);
     shuffleNext = { from: fromKey, key: item.track.key, heard: o.heard, wrapped: true };
     return { item, wrapped: true };
@@ -354,6 +371,23 @@ export function qualifiesCompletion(medium: 'full' | 'preview', coverage: number
   return coverage >= 20;
 }
 
+/**
+ * WP3 (plan 2026-11-24, A3/M6): what a Next press means, from how much of the song was really heard.
+ * - complete: at least COMPLETE_S heard and the completion share reached (a Next press near the end is a listen);
+ * - skip: from SKIP_MIN_S up to the early-skip limit: 12 s for a preview, else a quarter of the song clamped to
+ *   12..30 s, else 30 s when the length is unknown (the mood's own early-skip rule, never narrower than before);
+ * - partial: anything else from SKIP_MIN_S up (counts as heard, teaches no taste);
+ * - null: under SKIP_MIN_S.
+ * This classifies a listen only; it never moves playback on early (the next song still waits for the real end).
+ */
+export function classifyNext(listened: number, coverage: number, duration: number | null, medium: 'full' | 'preview'): 'complete' | 'skip' | 'partial' | null {
+  if (!(listened >= SKIP_MIN_S)) return null;
+  if (listened >= COMPLETE_S && qualifiesCompletion(medium, coverage, duration)) return 'complete';
+  const known = duration !== null && Number.isFinite(duration) && duration > 0;
+  const limit = medium === 'preview' ? SKIP_MAX_S : known ? Math.min(30, Math.max(SKIP_MAX_S, 0.25 * duration!)) : 30;
+  return listened < limit ? 'skip' : 'partial';
+}
+
 export function classNames(...xs: (string | false | null | undefined)[]): string {
   return xs.filter(Boolean).join(' ');
 }
@@ -486,14 +520,28 @@ export function describeTaste(t?: TasteSummary | null): string {
 }
 
 /**
- * The queue after a live re-rank: songs already played stay where they were (in order), the rest is
- * the new ranking, and ranks are renumbered so the list reads 1..n.
+ * The queue after a live re-rank. WP1 (plan 2026-11-24, A1/A4/A8) and SHUFFLE-STAY-001 (owner, 2026-11-24): "the song
+ * should stay in the queue but the song shouldnt be played again if other songs in the queue havent been played once".
+ * A re-rank only REORDERS: the result holds exactly the keys of `prev`. Played rows, hand-added rows (QUEUE-ADD-001)
+ * and rows the re-rank did not return keep their index; the re-ranked rows fill the remaining slots in the new order.
+ * Returned rows that are not in `prev` are ignored (membership changes only by an explicit add/remove or a discovery batch).
  */
 export function mergeRerank(prev: RecItem[], next: RecItem[], played: ReadonlySet<string>): RecItem[] {
-  // QUEUE-ADD-001: a song the listener added stays where they put it; the ranking never saw it.
-  const kept = prev.filter((x) => played.has(x.track.key) || x.added);
-  const keptKeys = new Set(kept.map((x) => x.track.key));
-  return [...kept, ...next.filter((x) => !keptKeys.has(x.track.key))].map((x, i) => ({ ...x, rank: i + 1 }));
+  const fixed = (x: RecItem) => played.has(x.track.key) || isPinned(x);
+  const movable = new Map(prev.filter((x) => !fixed(x)).map((x) => [x.track.key, x] as const));
+  const ranked: RecItem[] = [];
+  const seen = new Set<string>();
+  for (const x of next) {
+    const was = movable.get(x.track.key);
+    if (!was || seen.has(x.track.key)) continue;
+    seen.add(x.track.key);
+    // The engine's row brings the new score and reasons; the queue's own marks on the row stay.
+    ranked.push({ ...was, ...x, ...(was.found ? { found: was.found } : {}) });
+  }
+  let n = 0;
+  return prev
+    .map((x) => (!fixed(x) && seen.has(x.track.key) ? ranked[n++]! : x))
+    .map((x, i) => (x.rank === i + 1 ? x : { ...x, rank: i + 1 }));
 }
 
 const songsN = (n: number) => `${n} new song${n === 1 ? '' : 's'}`;

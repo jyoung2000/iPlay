@@ -27,14 +27,31 @@ object RadioCatalog {
   const val FAVOURITES = "radio/favourites"
   const val AZ = "radio/az/0"
   const val ALL = "radio/all"
+  // RADIO-AZ-ALL-001 (owner, 2026-11-24): '#' holds every name the Latin alphabet cannot index (other scripts,
+  // symbols, punctuation); digits have their own folder, so no station in the directory is left without a home.
   val LETTERS = ('A'..'Z').map { it.toString() } + "#"
   val NUMBERS = (0..9).map { it.toString() }
+  const val NUMBERS_FOLDER = "radio/numbers"
   fun initial(name: String): String = RadioNames.initial(name)
+  /** The car's A-Z tree: stations in order, then one folder per initial, then the numbers folder. */
+  fun allFolders(): List<String> = listOf(AZ) + LETTERS.map { "radio/letter/$it/0" } + NUMBERS_FOLDER
+  fun numberFolders(): List<String> = NUMBERS.map { "radio/letter/$it/0" }
+  /** The initial and page of a letter folder id, or null when the id is not one (never trust a browse id). */
+  fun letterFolder(id: String): Pair<String, Int>? {
+    val parts = id.split('/')
+    if (parts.size != 4 || parts[0] != "radio" || parts[1] != "letter") return null
+    val letter = parts[2].takeIf { it in LETTERS || it in NUMBERS } ?: return null
+    val offset = parts[3].toIntOrNull()?.takeIf { it in 0..1_000_000 } ?: return null
+    return letter to offset
+  }
 
   data class StationPage(val stations: List<Station>, val nextOffset: Int?)
   const val SEARCH = "radio/search"
   const val STATION_PREFIX = "radio/station/"
   const val PAGE_SIZE = 100
+  /** RADIO-AZ-ALL-001: rows per directory request, and rows scanned per car page, when browsing by initial. */
+  const val INITIAL_BATCH = 500
+  const val INITIAL_BUDGET = 4000
   const val MAX_FAVOURITES = 500
   private const val PREFS = "airwave-radio"
   private const val KEY = "favourites"
@@ -78,10 +95,13 @@ object RadioCatalog {
     fun text(key: String, fallback: String = "") = o.optString(key, fallback).takeUnless { it == "null" }.orEmpty().trim().take(500)
     val id = text("id").ifBlank { text("stationuuid") }
     val name = text("name")
-    val url = text("url_resolved").ifBlank { text("url") }
+    // RADIO-ROBUST-001: a playlist link is read fresh each time; the resolved address behind it can be an expired
+    // one-time session (WGN 720) or a retired server.
+    val playlist = Regex("\\.(m3u8?|pls)(\\?|$)|/playlist/", RegexOption.IGNORE_CASE).containsMatchIn(text("url"))
+    val url = if (playlist && publicUrl(text("url"))) text("url") else text("url_resolved").ifBlank { text("url") }
     if (id.isBlank() || name.isBlank() || !publicUrl(url)) return null
     val data = JSONObject().put("id", id).put("name", name).put("url", url)
-    for ((key, source) in listOf("homepage" to "homepage", "image" to "favicon", "country" to "country", "countryCode" to "countrycode", "region" to "state", "language" to "language", "codec" to "codec", "call" to "call")) {
+    for ((key, source) in listOf("homepage" to "homepage", "image" to "favicon", "country" to "country", "countryCode" to "countrycode", "region" to "state", "language" to "language", "codec" to "codec", "call" to "call", "iheartId" to "iheartId")) {
       val value = text(key).ifBlank { text(source) }
       data.put(key, if (key in listOf("homepage", "image") && !publicUrl(value)) "" else value)
     }
@@ -96,7 +116,7 @@ object RadioCatalog {
   }
 
   internal fun rows(array: JSONArray, limit: Int = PAGE_SIZE): List<Station> = (0 until minOf(array.length(), limit)).mapNotNull { array.optJSONObject(it)?.let(::normalize) }.distinctBy { it.id }
-  internal fun sorted(rows: List<Station>): List<Station> = rows.sortedWith(compareBy({ it.name.lowercase(Locale.ROOT) }, { it.id }))
+  internal fun sorted(rows: List<Station>): List<Station> = rows.sortedWith(compareBy({ RadioNames.sortKey(it.name) }, { it.id }))
   fun addListener(listener: () -> Unit) { listeners += listener }
   fun removeListener(listener: () -> Unit) { listeners -= listener }
   fun isFavourite(stationId: String): Boolean = favouriteRows.any { it.id == stationId }
@@ -166,7 +186,43 @@ object RadioCatalog {
       if (previous == null) retainContext.remove() else retainContext.set(previous)
     }
   }
-  fun canSkip(stationId: String): Boolean = selected.size > 1 && selected.any { it.id == stationId }
+  /** RADIO-SHUFFLE-NO-REPEAT-001 (owner, 2026-11-25): "shuffle on radio shouldnt repeat stations and shuffle should be
+   * able to load new stations". Stations tuned since shuffle went on are not drawn again; when the tuned list has no
+   * other unplayed station, a random page of the whole directory (A-Z, no filter) joins the draw. */
+  private val shuffleSeen = LinkedHashSet<String>()
+  private val world = LinkedHashMap<String, Station>()
+  @Volatile private var worldTotal = 0
+  @Synchronized fun markPlayed(stationId: String) {
+    shuffleSeen.remove(stationId); shuffleSeen.add(stationId)
+    while (shuffleSeen.size > 5000) shuffleSeen.remove(shuffleSeen.first())
+  }
+  @Synchronized fun resetShuffle(current: String?) { shuffleSeen.clear(); world.clear(); current?.let { shuffleSeen.add(it) } }
+  @Synchronized private fun unseenOther(stationId: String, random: kotlin.random.Random): Station? {
+    val pool = (selected + world.values).distinctBy { it.id }.filter { it.id != stationId && it.id !in shuffleSeen }
+    return if (pool.isEmpty()) null else pool[random.nextInt(pool.size)]
+  }
+  @Synchronized private fun addWorld(page: List<Station>) {
+    for (st in page) { world[st.id] = st; known[st.id] = st }
+    while (world.size > 2000) world.remove(world.keys.first())
+    while (known.size > 2000) known.remove(known.keys.first())
+  }
+  /** Network: only on a catalogue worker. */
+  private fun worldPage(): List<Station> {
+    val total = worldTotal.takeIf { it > 0 } ?: directory.worldCount().also { worldTotal = it }
+    return directory.worldPage(kotlin.random.Random.Default.nextInt(0, maxOf(1, minOf(total, 1_000_000) - PAGE_SIZE)))
+  }
+  private fun shuffleTarget(current: String): Station? {
+    unseenOther(current, kotlin.random.Random.Default)?.let { return it }
+    repeat(3) {
+      runCatching { worldPage() }.getOrNull()?.let(::addWorld)
+      unseenOther(current, kotlin.random.Random.Default)?.let { return it }
+    }
+    // Every station drawn (or the directory is down): a new round, still never the station on air.
+    synchronized(this) { shuffleSeen.clear(); shuffleSeen.add(current) }
+    return unseenOther(current, kotlin.random.Random.Default)
+  }
+  @Synchronized fun canSkip(stationId: String, shuffle: Boolean = false): Boolean =
+    (selected.size > 1 && selected.any { it.id == stationId }) || (shuffle && (selected.any { it.id != stationId } || world.isNotEmpty() || selected.isNotEmpty()))
   fun adjacent(stationId: String, dir: Int): Station? {
     val list = selected
     val at = list.indexOfFirst { it.id == stationId }
@@ -176,11 +232,8 @@ object RadioCatalog {
   /** RADIO-SHUFFLE-001: a uniformly random OTHER station of the tuned list; null when there is no
    * other (fewer than two stations, or the tuned station is not in its list), as ordered skips. */
   fun randomOther(stationId: String, random: kotlin.random.Random = kotlin.random.Random.Default): Station? {
-    val list = selected
-    val at = list.indexOfFirst { it.id == stationId }
-    if (at < 0 || list.size < 2) return null
-    val others = list.filterIndexed { i, _ -> i != at }
-    return others[random.nextInt(others.size)]
+    if (selected.none { it.id == stationId } && synchronized(this) { !world.containsKey(stationId) }) return null
+    return unseenOther(stationId, random)
   }
 
   /** Called only on a catalogue worker; cold ids are resolved by UUID, not by an Activity map. */
@@ -195,12 +248,12 @@ object RadioCatalog {
     return station
   }
   fun stationId(mediaId: String): String? = if (mediaId.startsWith(STATION_PREFIX)) Uri.decode(mediaId.removePrefix(STATION_PREFIX)).takeIf { it.isNotBlank() } else null
-  fun item(station: Station): MediaItem {
+  fun item(context: Context, station: Station): MediaItem {
     val data = station.json()
     val location = listOf(data.optString("region"), data.optString("country")).filter { it.isNotBlank() }.distinct().joinToString(", ")
     return MediaItem.Builder().setMediaId(STATION_PREFIX + Uri.encode(station.id)).setUri(station.url)
       .setMediaMetadata(MediaMetadata.Builder().setTitle(station.name).setArtist(location.ifBlank { "Live radio" })
-        .setSubtitle(location).setArtworkUri(data.optString("image").takeIf { it.isNotBlank() }?.let(Uri::parse))
+        .setSubtitle(location).setArtworkData(RadioArt.bytes(context), MediaMetadata.PICTURE_TYPE_FRONT_COVER)
         .setIsBrowsable(false).setIsPlayable(true).setMediaType(MediaMetadata.MEDIA_TYPE_RADIO_STATION).build()).build()
   }
 
@@ -209,7 +262,15 @@ object RadioCatalog {
     favourites(ctx, null)
     val favourites = sorted(favouriteRows.filter { query.isNotBlank() && RadioNames.matchesQuery(it.name, query) })
     val remembered = sorted(remembered().filter { query.isNotBlank() && RadioNames.matchesQuery(it.name, query) && favouriteRows.none { f -> f.id == it.id } })
-    val found = try { directory.stations(query, offset) } catch (e: Exception) { if (favourites.isEmpty() && remembered.isEmpty()) throw e else emptyList() }
+    // CAR-RADIO-IHEART-001: iHeart's own station search too (V103 and Power 92 are not in Radio Browser).
+    // Asked alongside Radio Browser, not after it; its matches are listed first.
+    val places = if (query.isBlank() || offset > 0) emptyList() else carFilters(ctx).places.mapNotNull { id -> savedPlaces(ctx).firstOrNull { it.id == id } }.ifEmpty { savedPlaces(ctx) }.filter { it.countryCode.equals("US", true) } // iHeart is a US directory
+    val askNear = if (places.isEmpty()) null else java.util.concurrent.CompletableFuture.supplyAsync { RadioIheart.searchNear(query, places) { RadioNative.fetchText(it) } }
+    val ask = if (query.isBlank() || offset > 0) null else java.util.concurrent.CompletableFuture.supplyAsync { RadioIheart.search(query) { RadioNative.fetchText(it) } }
+    val rb = try { Result.success(directory.stations(query, offset)) } catch (e: Exception) { Result.failure(e) }
+    val local = runCatching { askNear?.get(10, TimeUnit.SECONDS) }.getOrNull().orEmpty()
+    val iheart = (local + runCatching { ask?.get(10, TimeUnit.SECONDS) }.getOrNull().orEmpty()).distinctBy { it.id }
+    val found = RadioIheart.iheartFirst(RadioIheart.merge(rb.getOrElse { e -> if (favourites.isEmpty() && remembered.isEmpty() && iheart.isEmpty()) throw e else emptyList() }, iheart), local.map { it.id }.toSet())
     rememberNamedQuery(query, found)
     // Reuse real learned call-sign/frequency aliases across broad numeric searches.
     val fresh = found.associateBy { it.id }
@@ -223,6 +284,12 @@ object RadioCatalog {
     val result = if (offset == 0) StationPage((cachedAliases(initial = letter) + page.stations).map { fresh[it.id] ?: it }.distinctBy { it.id }, page.nextOffset) else page
     rememberStations(JSONArray(result.stations.map { it.json() }))
     result
+  }
+  /** RADIO-AZ-ALL-001: a bounded page of the whole world in alphabetical order, with the directory's own "more". */
+  fun azStations(ctx: Context, offset: Int): ListenableFuture<StationPage> = async {
+    val page = directory.azPage(offset)
+    rememberStations(JSONArray(page.stations.map { it.json() }))
+    page
   }
   /* --------------------------------------------------------------- CAR-RADIO-FILTERS-001 */
   private const val FILTERS_KEY = "car-filters"
@@ -279,7 +346,7 @@ object RadioCatalog {
   fun favouriteItems(ctx: Context): ListenableFuture<List<MediaItem>> = async {
     val rows = rows(favourites(ctx, null), MAX_FAVOURITES)
     rememberStations(JSONArray(rows.map { it.json() }))
-    rows.map(::item)
+    rows.map { item(ctx, it) }
   }
 
   /** EnginePlayer intercepts radio/station ids and returns this future instead of song lookup. */
@@ -288,12 +355,24 @@ object RadioCatalog {
     val station = resolve(ctx, id) ?: error("Station is unavailable")
     synchronized(tuning) { selectContext(id); start(ctx, station) }
   }
-  private fun start(ctx: Context, station: Station): JSONObject {
+  private fun start(ctx: Context, station: Station, autoSkipAttempts: Int = 0): JSONObject {
     check(!Thread.currentThread().isInterrupted) { "Radio request was cancelled" }
     return retainingContext {
       RadioNative.handle(ctx, JSONObject().put("op", "start")
         .put("stationId", station.id).put("name", station.name).put("title", "Live radio").put("url", station.url)
-        .put("station", station.json()))
+        .put("station", station.json()).put("autoSkipAttempts", autoSkipAttempts.coerceIn(0, RadioAutoSkip.MAX_ATTEMPTS)))
+    }
+  }
+
+  /** Advance past an immediate dead-directory 404 only while the same station is still selected. */
+  internal fun skipAfterFailure(ctx: Context, failedSessionId: String, failedStation: String, attempts: Int): ListenableFuture<JSONObject> = async {
+    synchronized(tuning) {
+      val live = RadioNative.session
+      if (live?.id != failedSessionId || live.station != failedStation) return@synchronized JSONObject().put("skipped", false)
+      val next = (if (RadioNative.shuffle) shuffleTarget(failedStation) else null) ?: adjacent(failedStation, 1)
+        ?: return@synchronized JSONObject().put("skipped", false)
+      android.util.Log.i("AirwaveRadio", "automatic skip after HTTP 404: ${next.id} ${next.name}")
+      start(ctx, next, attempts)
     }
   }
 
@@ -302,8 +381,10 @@ object RadioCatalog {
   fun skip(ctx: Context, dir: Int): ListenableFuture<JSONObject> = async {
     synchronized(tuning) {
       val current = RadioNative.session?.station ?: error("No radio station is playing")
-      val station = (if (RadioNative.shuffle) randomOther(current) else null)
+      val station = (if (RadioNative.shuffle) shuffleTarget(current) else null)
         ?: adjacent(current, dir) ?: error("No other station in this list")
+      // RADIO-CAR-SKIP-001: one line per press, so a skip on the car can be checked against what was tuned.
+      runCatching { android.util.Log.i("jPlayRadio", "skip dir=$dir shuffle=${RadioNative.shuffle} from=$current to=${station.id} ${station.name}") }
       start(ctx, station)
     }
   }
@@ -345,23 +426,39 @@ internal class RadioDirectory(private val fetch: (String) -> String) {
   private fun read(path: String): List<RadioCatalog.Station> = RadioCatalog.sorted(RadioCatalog.rows(readRaw(path)))
   /** A directory answer in the directory's own order (filtered car lists keep "most listened-to first"). */
   fun raw(path: String): JSONArray { require(path.startsWith("/json/stations/search?") && path.length <= 2000) { "Invalid directory search" }; return readRaw(path) }
+  // RADIO-AZ-ALL-001 (owner, 2026-11-24): Radio Browser filters names by substring only, so an initial is picked out
+  // locally. A batch holding no match for this initial must not end the letter — the scan runs a bounded budget of raw
+  // rows per car page and hands back an honest raw cursor, so every station in the world is reachable page by page.
   fun letterPage(letter: String, offset: Int): RadioCatalog.StationPage {
     require(letter in RadioCatalog.LETTERS + RadioCatalog.NUMBERS && offset in 0..1_000_000) { "Invalid station initial or page" }
-    val out = mutableListOf<RadioCatalog.Station>(); val seen = mutableSetOf<String>(); var cursor = offset
-    repeat(2) {
+    val out = mutableListOf<RadioCatalog.Station>(); val seen = mutableSetOf<String>()
+    var cursor = offset; var scanned = 0
+    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(12)
+    while (scanned < RadioCatalog.INITIAL_BUDGET) {
       val q = if (letter == "#") "" else "&name=$letter"
-      val raw = readRaw("/json/stations/search?hidebroken=true&order=name&reverse=false&limit=120&offset=$cursor$q")
-      val size = minOf(raw.length(), 120)
+      val raw = try { readRaw("/json/stations/search?order=name&reverse=false&limit=${RadioCatalog.INITIAL_BATCH}&offset=$cursor$q") }
+      // A batch that fails keeps what this page already found and resumes there, rather than skipping those stations.
+      catch (e: Exception) { if (scanned == 0) throw e else return RadioCatalog.StationPage(RadioCatalog.sorted(out), cursor.takeIf { it <= 1_000_000 }) }
+      val size = raw.length()
       for (index in 0 until size) {
         val station = raw.optJSONObject(index)?.let(RadioCatalog::normalize) ?: continue
         if (!RadioNames.matchesInitial(station.name, letter) || !seen.add(station.id)) continue
         out += station
-        if (out.size == 100) return RadioCatalog.StationPage(RadioCatalog.sorted(out), if (index + 1 < size || size == 120) cursor + index + 1 else null)
+        if (out.size == RadioCatalog.PAGE_SIZE) return RadioCatalog.StationPage(RadioCatalog.sorted(out), if (index + 1 < size || size == RadioCatalog.INITIAL_BATCH) cursor + index + 1 else null)
       }
-      cursor += size
-      if (size < 120) return RadioCatalog.StationPage(RadioCatalog.sorted(out), null)
+      cursor += size; scanned += size
+      if (size < RadioCatalog.INITIAL_BATCH) return RadioCatalog.StationPage(RadioCatalog.sorted(out), null)
+      if (System.nanoTime() >= deadline) break
     }
     return RadioCatalog.StationPage(RadioCatalog.sorted(out), cursor.takeIf { it <= 1_000_000 })
+  }
+  /** RADIO-AZ-ALL-001: one page of the plain A-Z list, with "More" offered whenever the directory itself has more. */
+  fun azPage(offset: Int): RadioCatalog.StationPage {
+    require(offset in 0..1_000_000) { "Invalid radio page" }
+    val raw = readRaw("/json/stations/search?order=name&reverse=false&limit=${RadioCatalog.PAGE_SIZE}&offset=$offset")
+    val size = raw.length()
+    val stations = RadioCatalog.sorted((0 until size).mapNotNull { raw.optJSONObject(it)?.let(RadioCatalog::normalize) }.distinctBy { it.id })
+    return RadioCatalog.StationPage(stations, (offset + size).takeIf { size == RadioCatalog.PAGE_SIZE && it <= 1_000_000 })
   }
   fun stations(query: String, offset: Int): List<RadioCatalog.Station> {
     require(offset in 0..1_000_000 && query.length <= 100) { "Invalid station search" }
@@ -370,6 +467,19 @@ internal class RadioDirectory(private val fetch: (String) -> String) {
     val found = read("/json/stations/search?hidebroken=true&$ordering&limit=100&offset=$offset" +
       if (query.isBlank()) "" else "&name=" + URLEncoder.encode(RadioNames.source(query), "UTF-8"))
     return if (alias == null) found else found.filter { RadioNames.matchesQuery(it.name, query) }
+  }
+  /** RADIO-SHUFFLE-NO-REPEAT-001: how many stations the directory holds, so shuffle can open a random A-Z page. */
+  fun worldCount(): Int {
+    for (mirror in mirrors) {
+      val n = runCatching { JSONObject(fetch("$mirror/json/stats")).optInt("stations", 0) }.getOrDefault(0)
+      if (n > 0) return n
+    }
+    return 40_000
+  }
+  /** A page of every station in the world by name, with no filter (RADIO-AZ-ALL-001's whole directory). */
+  fun worldPage(offset: Int): List<RadioCatalog.Station> {
+    require(offset in 0..1_000_000) { "Invalid station offset" }
+    return RadioCatalog.rows(readRaw("/json/stations/search?order=name&reverse=false&limit=100&offset=$offset"))
   }
   fun byId(id: String): RadioCatalog.Station? {
     RadioIheart.byIdUrl(id)?.let { url -> return RadioIheart.parse(fetch(url)).firstOrNull { it.id == id } }

@@ -50,6 +50,8 @@ object MediaHub {
     val source: String? = null,
     /** CAR-SEARCH-TYPES-001: the kinds the page found this song to be (single/album/feature/lyrics). */
     val kinds: Set<String> = emptySet(),
+    /** SHUFFLE-ONCE-001: the page heard this queue song before; the queue's shuffle does not play it again. */
+    val heard: Boolean = false,
   )
 
   /** A browsable folder in the Android Auto tree: the now playing queue, one playlist, or one album
@@ -87,6 +89,8 @@ object MediaHub {
     /** CAR-ACTIONS-001: the page's Star (like) and Dislike state for [mediaId]. */
     val liked: Boolean = false,
     val disliked: Boolean = false,
+    /** SHUFFLE-ONCE-001: the queue is the now playing queue under shuffle, whose songs play once. */
+    val once: Boolean = false,
   )
 
   const val C_TIME_UNSET: Long = Long.MIN_VALUE + 1 // mirrors androidx.media3.common.C.TIME_UNSET
@@ -108,15 +112,40 @@ object MediaHub {
    *  be relied on to answer, so then the service's own catalogue engine answers car searches. */
   @Volatile private var pageVisible: Boolean = true
 
-  fun setCommandSink(s: (JSONObject) -> Unit) { sink = s; pageAnswering = false; pageVisible = true }
+  fun setCommandSink(s: (JSONObject) -> Unit) { sink = s; pageAnswering = false; pageVisible = true; pageRunning = { true } }
   fun setPageVisible(s: (JSONObject) -> Unit, visible: Boolean) {
     if (sink !== s) return
     pageVisible = visible
+    // CAR-ACTIONS-EVERY-TIME-001: a hidden page may never answer; after a moment its car presses go to the service engine.
+    if (!visible) main.postDelayed({ rerouteHidden() }, 3000)
     if (visible) main.post { synchronized(catalogLock) { pendingSearches.keys.toList() }.forEach(::dispatchCatalogSearch) }
+    // CAR-SAVE-HIDDEN-001: back in front, the page takes what the car pressed while nothing could save it.
+    if (visible && pageAnswering) CarFeedback.flush()
+  }
+
+  /** CAR-SAVE-HIDDEN-001: whether the page behind [sink] runs its JavaScript now (a paused WebView runs none). */
+  @Volatile private var pageRunning: () -> Boolean = { true }
+  fun setPageRunning(s: (JSONObject) -> Unit, running: () -> Boolean) { if (sink === s) pageRunning = running }
+
+  /** CAR-SAVE-HIDDEN-001: whether the service's own page is the engine and has said it is ready. */
+  @Volatile var serviceSaves: () -> Boolean = { ServiceApi.core.ready }
+
+  /** CAR-SAVE-HIDDEN-001: where a star or a playlist choice made in the car is saved now; null: keep it. */
+  fun saveSink(): ((JSONObject) -> Unit)? = when (saveRoute()) {
+    CarRoute.To.PAGE -> sink
+    CarRoute.To.SERVICE -> catalogSink
+    CarRoute.To.KEEP -> null
+  }
+  /** Whether a car save made now goes to the phone page (rather than the service's engine, or nowhere). */
+  fun savesGoToPage(): Boolean = saveRoute() == CarRoute.To.PAGE
+  private fun saveRoute(): CarRoute.To {
+    val service = catalogSink != null && catalogReady && runCatching { serviceSaves() }.getOrDefault(false)
+    return CarRoute.saveTarget(sink != null, pageAnswering, pageVisible, runCatching { pageRunning() }.getOrDefault(false), service)
   }
   fun clearCommandSink(s: (JSONObject) -> Unit) {
     if (sink !== s) return
     sink = null
+    pageRunning = { true }
     // CAR-CATALOG-SERVICE-001: only what the page held is lost with it; the service engine's searches carry on.
     failPending("page", "Open jPlay on your phone to search the catalogue")
   }
@@ -134,6 +163,8 @@ object MediaHub {
     if (catalogSink !== s) return
     catalogReady = true
     main.post { synchronized(catalogLock) { pendingSearches.keys.toList() }.forEach(::dispatchCatalogSearch) }
+    // CAR-SAVE-HIDDEN-001: the service engine takes what the car pressed while nothing could save it.
+    main.post { CarFeedback.flush() }
   }
   fun clearCatalogSink(s: (JSONObject) -> Unit) {
     if (catalogSink !== s) return
@@ -141,8 +172,19 @@ object MediaHub {
     catalogReady = false
     failPending("catalog", "The music catalogue stopped")
   }
+  /** For tests: stand in for the service engine's page, and put the real one back with what this returns. */
+  internal fun swapCatalogSinkForTests(s: ((JSONObject) -> Unit)?, ready: Boolean): Pair<((JSONObject) -> Unit)?, Boolean> {
+    val old = catalogSink to catalogReady
+    catalogSink = s; catalogReady = ready
+    return old
+  }
 
   /** Car Identify can be answered now: by the service engine, or by a page that is answering. */
+  /** ARTIST-FAV-CAR-001: hands a command to the service's own engine page; false when it is not ready. */
+  fun toServiceEngine(cmd: JSONObject): Boolean {
+    val s = catalogSink?.takeIf { catalogReady } ?: return false
+    return runCatching { s(cmd) }.isSuccess
+  }
   fun canIdentify(): Boolean = (catalogSink != null && catalogReady) || (sink != null && pageAnswering)
 
   /** Fail the searches sent through [via], and the unsent ones nothing is left to answer. */
@@ -161,6 +203,8 @@ object MediaHub {
     json.optJSONObject("identify")?.let { acceptIdentifyReply(it) }
     json.optJSONObject("similar")?.let { acceptSimilarReply(it) }
     json.optJSONObject("mood")?.let { acceptMoodReply(it) }
+    json.optJSONObject("moodDiscover")?.let { acceptMoodDiscoverReply(it) }
+    json.optJSONObject("starArtists")?.let { acceptArtistsReply(it) }
   }
 
   /** A native surface (lock screen, Bluetooth, car) asked for something; hand it to the page. */
@@ -184,6 +228,8 @@ object MediaHub {
     json.optJSONObject("search")?.let { acceptCatalogReply(it) }
     json.optJSONObject("identify")?.let { acceptIdentifyReply(it) }
     json.optJSONObject("similar")?.let { acceptSimilarReply(it) }
+    json.optJSONObject("moodDiscover")?.let { acceptMoodDiscoverReply(it) }
+    json.optJSONObject("starArtists")?.let { acceptArtistsReply(it) }
     // CAR-ACTIONS-001: judgements made in the car while no page could answer go to it now that it
     // can, once it holds a library to find their songs in.
     if (firstAnswer) carFeedbackDelivered = false
@@ -341,11 +387,21 @@ object MediaHub {
   fun addToPlaylistNow(listId: String, songId: String) {
     val song = findSong(songId) ?: return
     var changed = false
-    playlists = playlists.map { f ->
-      if (f.id != listId || f.album || f.songs.any { it.id == songId }) f
+    // CAR-HEART-ALWAYS-001: the car's own first playlist shows in the car at once, under the name it will have.
+    val starting = listId == CarPickList.NEW_LIST && playlists.none { it.id == listId || (!it.album && it.title == CarPickList.NEW_LIST_NAME) }
+    if (starting) { playlists = playlists + Folder(listId, CarPickList.NEW_LIST_NAME, listOf(song)); changed = true }
+    else playlists = playlists.map { f ->
+      val target = f.id == listId || (listId == CarPickList.NEW_LIST && !f.album && f.title == CarPickList.NEW_LIST_NAME)
+      if (!target || f.album || f.songs.any { it.id == songId }) f
       else { changed = true; f.copy(songs = f.songs + song) }
     }
-    if (changed) notifyListeners()
+    if (!changed) return
+    // CAR-SAVE-HIDDEN-001: and in the saved library the car reads on a cold start, without waiting for the phone app.
+    runCatching {
+      val saved = playlists.firstOrNull { it.songs.any { s -> s.id == songId } && (it.id == listId || (listId == CarPickList.NEW_LIST && it.title == CarPickList.NEW_LIST_NAME)) }
+      if (saved != null) NativeLibraryState.addToPlaylist(saved.id, NativeStateCodec.songJson(song), if (starting) CarPickList.NEW_LIST_NAME else null)
+    }
+    notifyListeners()
   }
 
   /** ALBUM-SAVE-001: saved albums, listed under Albums in the car; the rest are playlists. */
@@ -566,22 +622,129 @@ object MediaHub {
    * service's own engine; the songs it adds are at the end of the now playing list, as on the phone.
    */
   fun findSimilar(id: String, timeoutMs: Long = 200000): ListenableFuture<SimilarAnswer> {
-    val page = sink?.takeIf { pageVisible && pageAnswering }
-    val target = page ?: catalogSink?.takeIf { catalogReady } ?: sink
-      ?: return Futures.immediateFailedFuture(IllegalStateException("Open jPlay on your phone to find similar songs"))
+    // CAR-ACTIONS-EVERY-TIME-001 (owner, 2026-11-25): "ensure the find similar songs button and favorite artist work
+    // everytime on android auto". A press while the service's engine was still starting failed at once ("Open jPlay"),
+    // and one sent to a page that then went to the background waited out the whole timeout. Now the press waits for a
+    // surface that can answer, and one the hidden page has not answered moves to the service's engine.
+    if (sink == null && catalogSink == null) return Futures.immediateFailedFuture(IllegalStateException("Open jPlay on your phone to find similar songs"))
     val requestId = UUID.randomUUID().toString()
     val future = SettableFuture.create<SimilarAnswer>()
     synchronized(catalogLock) { pendingSimilar[requestId] = future }
     main.postDelayed({
+      synchronized(catalogLock) { reroutable.remove(requestId) }
       synchronized(catalogLock) { pendingSimilar.remove(requestId) }?.setException(TimeoutException("Finding similar songs took too long"))
     }, timeoutMs.coerceIn(50, 300000))
-    try {
-      target(JSONObject().put("type", "findSimilar").put("requestId", requestId).put("id", id))
-    } catch (e: Exception) {
-      synchronized(catalogLock) { pendingSimilar.remove(requestId) }
-      future.setException(e)
+    sendWhenAnswerable(requestId, JSONObject().put("type", "findSimilar").put("requestId", requestId).put("id", id), ANSWER_WAIT_MS) { why ->
+      synchronized(catalogLock) { pendingSimilar.remove(requestId) }?.setException(IllegalStateException(why ?: "Open jPlay on your phone to find similar songs"))
     }
     return future
+  }
+
+  /** MOOD-DEFAULT-CAR-001: what one car "Discover for my mood" run added. */
+  data class MoodDiscoverAnswer(val added: Int, val leading: List<String>, val reason: String, val songs: List<Song>)
+  private val pendingMoodDiscover = LinkedHashMap<String, SettableFuture<MoodDiscoverAnswer>>()
+
+  /**
+   * MOOD-DEFAULT-CAR-001: ask the page in front (else the service's engine) for one Discover run from the listening
+   * mood. Waits for a surface that can answer, as Find similar does (CAR-ACTIONS-EVERY-TIME-001).
+   */
+  fun discoverMood(timeoutMs: Long = 200000): ListenableFuture<MoodDiscoverAnswer> {
+    if (sink == null && catalogSink == null) return Futures.immediateFailedFuture(IllegalStateException("Open jPlay on your phone to discover for your mood"))
+    val requestId = UUID.randomUUID().toString()
+    val future = SettableFuture.create<MoodDiscoverAnswer>()
+    synchronized(catalogLock) { pendingMoodDiscover[requestId] = future }
+    main.postDelayed({
+      synchronized(catalogLock) { reroutable.remove(requestId) }
+      synchronized(catalogLock) { pendingMoodDiscover.remove(requestId) }?.setException(TimeoutException("Discovering took too long. The songs will join your queue when it finishes"))
+    }, timeoutMs.coerceIn(50, 300000))
+    sendWhenAnswerable(requestId, JSONObject().put("type", "discoverMood").put("requestId", requestId), ANSWER_WAIT_MS) { why ->
+      synchronized(catalogLock) { pendingMoodDiscover.remove(requestId) }?.setException(IllegalStateException(why ?: "Open jPlay on your phone to discover for your mood"))
+    }
+    return future
+  }
+
+  private fun acceptMoodDiscoverReply(reply: JSONObject) {
+    val future = synchronized(catalogLock) { reroutable.remove(reply.optString("requestId")); pendingMoodDiscover.remove(reply.optString("requestId")) } ?: return
+    val error = reply.optString("error")
+    if (error.isNotBlank()) { future.setException(IllegalStateException(error.take(200))); return }
+    val songs = parseSongs(reply.optJSONArray("songs") ?: JSONArray()).distinctBy { it.id }.take(50)
+    val leading = reply.optJSONArray("leading")?.let { a -> (0 until a.length()).mapNotNull { a.optString(it).takeIf { s -> s.isNotBlank() } } }.orEmpty().take(3)
+    future.set(MoodDiscoverAnswer(reply.optInt("added", songs.size), leading, reply.optString("reason").take(200), songs))
+  }
+
+  /** CAR-ACTIONS-EVERY-TIME-001: how long a car press waits for the page or the service's engine to be able to answer. */
+  internal const val ANSWER_WAIT_MS = 25_000L
+  /** CAR-ACTIONS-EVERY-TIME-001: a car press in flight: what was sent, and to which surface. */
+  private class Reroute(val cmd: JSONObject, @Volatile var via: String)
+  private val reroutable = LinkedHashMap<String, Reroute>()
+  /** The surface that can answer a car press now: the page in front when it answers, else the service's engine. */
+  private fun answerer(): Pair<(JSONObject) -> Unit, String>? =
+    sink?.takeIf { pageVisible && pageAnswering }?.let { it to "page" } ?: catalogSink?.takeIf { catalogReady }?.let { it to "catalog" }
+
+  private fun sendWhenAnswerable(requestId: String, cmd: JSONObject, waitMs: Long, gaveUp: (String?) -> Unit) {
+    synchronized(catalogLock) {
+      reroutable[requestId] = Reroute(cmd, "")
+      while (reroutable.size > 32) reroutable.remove(reroutable.keys.first())
+    }
+    val until = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(waitMs)
+    fun attempt() {
+      if (synchronized(catalogLock) { !reroutable.containsKey(requestId) }) return // answered or timed out meanwhile
+      val found = answerer()
+      if (found == null) {
+        if (System.nanoTime() < until) main.postDelayed({ attempt() }, 250)
+        else { synchronized(catalogLock) { reroutable.remove(requestId) }; gaveUp(null) }
+        return
+      }
+      synchronized(catalogLock) { reroutable[requestId]?.via = found.second }
+      try { found.first(cmd) } catch (e: Exception) { synchronized(catalogLock) { reroutable.remove(requestId) }; gaveUp(e.message) }
+    }
+    if (Looper.myLooper() == Looper.getMainLooper()) attempt() else main.post { attempt() }
+  }
+
+  /** CAR-ACTIONS-EVERY-TIME-001: presses the page took and has not answered since it went to the background. */
+  private fun rerouteHidden() {
+    if (pageVisible) return
+    val engine = catalogSink?.takeIf { catalogReady } ?: return
+    val moved = synchronized(catalogLock) { reroutable.values.filter { it.via == "page" && it.cmd.optString("type") == "starArtists" }.onEach { it.via = "catalog" }.map { it.cmd } }
+    moved.forEach { runCatching { engine(it) } }
+  }
+
+  /** ARTIST-FAV-CAR-001: the artists a press actually starred, as the page or the engine saved them. */
+  data class ArtistAnswer(val names: List<String>, val saved: Boolean)
+  private val pendingArtists = LinkedHashMap<String, SettableFuture<ArtistAnswer>>()
+
+  /**
+   * CAR-ANSWERABLE-001 (owner, 2026-11-23): "sometimes the ... heart artist buttons don't work". The
+   * star used to be handed to the page whether or not it could answer, and the driver was told it was
+   * saved either way. Now only a surface that can answer is asked, and it says when it has saved; the
+   * caller tells the driver the truth. No surface at all: the caller keeps it for the app (CarFeedback).
+   */
+  fun starArtists(id: String, credit: String, track: JSONObject?, timeoutMs: Long = 30000, keep: (() -> Unit)? = null): ListenableFuture<ArtistAnswer>? {
+    // CAR-ACTIONS-EVERY-TIME-001: wait for a surface while one starts instead of dropping the press; a press nothing
+    // could take within the wait is kept for the app (keep) and the caller says so.
+    if (sink == null && catalogSink == null) return null
+    val requestId = UUID.randomUUID().toString()
+    val future = SettableFuture.create<ArtistAnswer>()
+    synchronized(catalogLock) { pendingArtists[requestId] = future }
+    main.postDelayed({
+      synchronized(catalogLock) { reroutable.remove(requestId) }
+      synchronized(catalogLock) { pendingArtists.remove(requestId) }?.setException(TimeoutException("Starring the artist took too long"))
+    }, timeoutMs.coerceIn(50, 60000))
+    val cmd = JSONObject().put("type", "starArtists").put("requestId", requestId).put("id", id).put("artist", credit)
+    if (track != null) cmd.put("track", track)
+    sendWhenAnswerable(requestId, cmd, minOf(ANSWER_WAIT_MS, timeoutMs.coerceIn(50, 60000) - 2000).coerceAtLeast(50)) { why ->
+      keep?.invoke()
+      synchronized(catalogLock) { pendingArtists.remove(requestId) }?.setException(IllegalStateException(why ?: "Kept for when jPlay opens"))
+    }
+    return future
+  }
+
+  private fun acceptArtistsReply(reply: JSONObject) {
+    val future = synchronized(catalogLock) { reroutable.remove(reply.optString("requestId")); pendingArtists.remove(reply.optString("requestId")) } ?: return
+    val error = reply.optString("error")
+    if (error.isNotBlank()) { future.setException(IllegalStateException(error.take(200))); return }
+    val names = reply.optJSONArray("names")
+    future.set(ArtistAnswer((0 until (names?.length() ?: 0)).mapNotNull { names!!.optString(it).takeIf { s -> s.isNotBlank() } }.take(6), true))
   }
 
   /** CAR-MOOD-001: the engine's order for the car's movable songs, and the moods leading it. */
@@ -624,7 +787,7 @@ object MediaHub {
   }
 
   private fun acceptSimilarReply(reply: JSONObject) {
-    val future = synchronized(catalogLock) { pendingSimilar.remove(reply.optString("requestId")) } ?: return
+    val future = synchronized(catalogLock) { reroutable.remove(reply.optString("requestId")); pendingSimilar.remove(reply.optString("requestId")) } ?: return
     val error = reply.optString("error")
     if (error.isNotBlank()) { future.setException(IllegalStateException(error.take(200))); return }
     val songs = parseSongs(reply.optJSONArray("songs") ?: JSONArray()).distinctBy { it.id }.take(10)
@@ -692,8 +855,12 @@ object MediaHub {
       reportedAt = android.os.SystemClock.elapsedRealtime(),
       liked = o.optBoolean("liked", false),
       disliked = o.optBoolean("disliked", false),
+      once = o.optBoolean("once", false),
     )
   }
+
+  /** QUEUE-HEARD-001: songs a page sent for the queue, parsed like a reply's (bounded, no repeats). */
+  fun songsOf(a: JSONArray): List<Song> = parseSongs(a).distinctBy { it.id }.take(60)
 
   private fun parseSongs(a: JSONArray): List<Song> {
     val out = ArrayList<Song>(a.length())
@@ -711,6 +878,7 @@ object MediaHub {
           ready = o.optBoolean("ready", false),
           source = o.optStringOrNull("source")?.takeIf { o.optBoolean("ready", false) && Downloads.urlAllowed(it) },
           kinds = o.optJSONArray("kinds")?.let { k -> (0 until k.length()).mapNotNull { k.optString(it).takeIf { s -> s in CarSearch.KINDS } }.toSet() } ?: emptySet(),
+          heard = o.optBoolean("heard", false),
         ),
       )
     }

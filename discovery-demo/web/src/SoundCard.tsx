@@ -33,6 +33,8 @@ export function SoundCard({
   historyKey = STORE_KEY,
   emptyText,
   idleText = 'Play, skip or like songs and this redraws.',
+  hideTitle = false,
+  hideNote = false,
 }: {
   taste: TasteSummary | null;
   listening: boolean;
@@ -43,6 +45,10 @@ export function SoundCard({
   historyKey?: string;
   emptyText?: string;
   idleText?: string;
+  /** ALBUM-TIDY-001: the card keeps its name for screen readers but does not print it (the album page). */
+  hideTitle?: boolean;
+  /** ALBUM-NOTE-001: the line under a drawn bar is kept for screen readers but not printed (the album page). */
+  hideNote?: boolean;
 }) {
   const view = useMemo(() => soundView(taste), [taste]);
   const [open, setOpen] = useState(defaultOpen);
@@ -88,7 +94,7 @@ export function SoundCard({
       <button className="sound__head" type="button" aria-expanded={open} aria-controls={bodyId} onClick={() => setOpen((o) => !o)}>
         <span className="sound__title">
           <span className={classNames('sound__live', listening && 'is-on')} aria-hidden="true" />
-          {title}
+          {hideTitle ? <span className="sr">{title}</span> : title}
         </span>
         <span className="sound__summary-label">{label}</span>
         <span className="sound__chev" aria-hidden="true">
@@ -105,7 +111,7 @@ export function SoundCard({
         )}
       </div>
 
-      <p className="sound__changes" role="status" aria-live="polite">
+      <p className={hideNote && view && !announce ? 'sr' : 'sound__changes'} role="status" aria-live="polite">
         {announce ? (
           <>
             {changes.map((c) => (

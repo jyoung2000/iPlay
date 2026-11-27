@@ -1,33 +1,55 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { api, type PlaylistSummary } from './api';
 import { favouriteStations, saveFavouriteStations, radioSession } from './engine/radio-client';
-import { stationLocation, broadcastTimeline, radioClock as clock } from './engine/radio';
+import { GapWindow, radioErrorText, stationLocation, broadcastTimeline, radioClock as clock } from './engine/radio';
 import { Art } from './Art';
-import { Volume } from './Volume';
+import { PlayingArtistHeart } from './FavArtists';
+import { volumeStore } from './volume-store';
+import { VOLUME_MAX } from './engine/volume-boost';
 import { Glyph } from '@now-playing/aqua-ui/icons';
 import { ShuffleGlyph } from './icons';
 import { engineSend } from './engine/native-engine';
-import { genreBubbles } from './util';
+import { mediaNativeAvailable, setMediaHandlers } from './engine/media-native';
 import { GenreBubbleView } from './Results';
 import { TagStrip } from './TagStrip';
-import { classifyStation } from './engine/radio-genres';
+import { Marquee } from './Marquee';
+import { radioTagBubbles } from './engine/display-tags';
 import { radioArtistTarget, type RadioArtistTarget } from './engine/radio-artist';
 import './radio.css';
 
 /** RADIO-BEHIND-TRUE-001: this much older than the newest audio received, after a pause or rewind, is behind live. */
 export const BEHIND_LIVE_S = 4;
 export function RadioPlayer({ docked = false, onOpenArtist, onPlaySong, onDownloadSong }: { docked?: boolean; onOpenArtist?: (target: RadioArtistTarget) => void; onPlaySong?: (t: NonNullable<ReturnType<typeof radioSession.get>['track']>) => void; onDownloadSong?: (t: NonNullable<ReturnType<typeof radioSession.get>['track']>) => Promise<unknown> } = {}) {
-  const r = useSyncExternalStore(radioSession.subscribe, radioSession.get); const [menu, setMenu] = useState(false), [lists, setLists] = useState<PlaylistSummary[]>([]), [message, setMessage] = useState(''), [busy, setBusy] = useState(false), [volume, setVolume] = useState(1), [stationStar, setStationStar] = useState(false);
+  const r = useSyncExternalStore(radioSession.subscribe, radioSession.get); const [menu, setMenu] = useState(false), [lists, setLists] = useState<PlaylistSummary[]>([]), [message, setMessage] = useState(''), [busy, setBusy] = useState(false), [stationStar, setStationStar] = useState(false);
   const [downloading, setDownloading] = useState(false);
-  const lastVolume = useRef(1);
-  const changeVolume = (next: number) => {
-    const v = Math.max(0, Math.min(1, next));
-    if (v > 0) lastVolume.current = v;
-    setVolume(v);
-    radioSession.volume(v); // Web Audio radio graph on Windows
-    engineSend({ op: 'settings', volume: v }); // native playback, including radio on Android
-  };
+  const gaps = useRef(new GapWindow());
+  useEffect(() => { gaps.current.reset(); }, [r.station?.id, r.timeshifted]);
   const t = r.track, snap = r.snapshot, s = r.station;
+  // VOLUME-SETTINGS-001: the radio plays at the app's volume (set at the top of Settings); it had a level of its own
+  // that started at 100% each time and was not remembered.
+  const volume = useSyncExternalStore(volumeStore.subscribe, volumeStore.audible);
+  const sessionId = snap?.id ?? null, nativeRadio = !!snap?.native;
+  useEffect(() => { radioSession.volume(Math.min(1, volume)); }, [volume, sessionId]); // the Web Audio radio graph (Windows)
+  useEffect(() => {
+    // A new native radio session must receive the persisted setting even if the song player never mounted.
+    if (nativeRadio) engineSend({ op: 'settings', volume });
+  }, [nativeRadio, sessionId, volume]);
+  // The car's Volume button moves the app's level while the radio plays too.
+  useEffect(() => { if (mediaNativeAvailable()) setMediaHandlers({ volume: (v) => volumeStore.set(v) }); }, []);
+  useEffect(() => {
+    volumeStore.setLimits(nativeRadio ? VOLUME_MAX : 1, '');
+    return () => volumeStore.setLimits(VOLUME_MAX, '');
+  }, [nativeRadio]);
+  // PLAYER-ARTIST-HEART-001: the artists of the SONG on air. An identified song carries its own credits; otherwise the
+  // broadcaster's text is cleaned to the artist its own link opens, so the heart stars exactly the named artist.
+  // A programme (and a station's own genre tags) is not a song and never becomes a listener preference: pressing the
+  // heart is an explicit choice about an artist, not taste learned from the station.
+  // What is on air decides, not the track object: while an unidentified song plays, `track` is still the station's
+  // programme bookmark (kind 'radio-programme'), so reading its kind would disable the heart on every live song.
+  const heartArtists = (r.broadcast?.kind !== 'song' ? []
+    : r.identified && t?.kind !== 'radio-programme' ? (t?.artists?.length ? t.artists : [t?.artist])
+    : [radioArtistTarget(r.broadcast?.artist ?? null, null, null)?.name])
+    .filter((x): x is string => !!x);
   // Anchor the published item clock to the ring's sample clock once audio is arriving. Network
   // bursts must not make a paused playhead wobble, and no start is inferred if none was published.
   const audible = !!snap && snap.received > 0;
@@ -45,7 +67,7 @@ export function RadioPlayer({ docked = false, onOpenArtist, onPlaySong, onDownlo
   // A wall-clock estimate of the live edge ran ahead of a stream that arrives in bursts, so it read BEHIND LIVE with
   // nothing paused or rewound. Now only the listener's own pause or rewind puts them behind, and only while the
   // audio they hear is more than BEHIND_LIVE_S older than the newest audio received.
-  const gap = snap ? Math.max(0, snap.received - snap.position) : 0;
+  const gap = snap ? gaps.current.add(Date.now(), Math.max(0, snap.received - snap.position)) : 0;
   const behindLive = !!snap && !snap.paused && !!r.timeshifted && gap > BEHIND_LIVE_S;
   const atLive = !!snap && !snap.paused && !behindLive;
   const goLive = () => void radioSession.goLive().catch(e => setMessage(String(e.message)));
@@ -65,7 +87,7 @@ export function RadioPlayer({ docked = false, onOpenArtist, onPlaySong, onDownlo
     <button type="button" className="radio-player__close" aria-label="Stop radio" title="Stop listening and close the radio player" onClick={() => void radioSession.stop()}>
       <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
     </button>
-    <div className="radio-player__main"><figure className="radio-player__art"><Art src={artwork} size={64} alt={`${artKind}: ${t?.title || r.broadcast?.title || s.name}`} /></figure><div className="radio-player__identity">{behindLive ? <button type="button" className="radio-live radio-live--behind" title="Go back to the live broadcast" onClick={goLive}>● BEHIND LIVE</button> : <span className="radio-live">● {snap?.paused ? 'PAUSED' : 'LIVE RADIO'}</span>}<div className="radio-player__titleline"><strong title={t?.title || s.name}>{t && onPlaySong ? <button type="button" className="artistlink radio-player__song" aria-label={`Play the song ${t.title}`} onClick={() => onPlaySong(t)}>{t.title}</button> : t?.title || r.broadcast?.title || s.name}</strong><button type="button" className="iconbtn radio-player__starbtn" aria-pressed={stationStar} aria-label={stationStar ? `Unstar station ${s.name}` : `Star station ${s.name}`} title={stationStar ? 'Remove this station from your starred stations' : 'Star this station'} onClick={() => { void favouriteStations().then(list => saveFavouriteStations(stationStar ? list.filter(x => x.id !== s.id) : [...list.filter(x => x.id !== s.id), s])).then(() => setStationStar(!stationStar)).catch(() => setMessage('Station favourite could not be saved')); }}>{stationStar ? '★' : '☆'}</button></div><span>{(() => { // RADIO-ARTIST-001: an identified song opens its catalogue artists (the lead with its provider id);
+    <div className="radio-player__main"><figure className="radio-player__art"><Art src={artwork} size={64} alt={`${artKind}: ${t?.title || r.broadcast?.title || s.name}`} /></figure><div className="radio-player__identity">{behindLive ? <button type="button" className="radio-live radio-live--behind" title="Go back to the live broadcast" onClick={goLive}>● BEHIND LIVE</button> : <span className="radio-live">● {snap?.paused ? 'PAUSED' : 'LIVE RADIO'}</span>}<div className="radio-player__titleline"><strong title={t?.title || s.name}><Marquee>{t && onPlaySong ? <button type="button" className="artistlink radio-player__song" aria-label={`Play the song ${t.title}`} onClick={() => onPlaySong(t)}>{t.title}</button> : t?.title || r.broadcast?.title || s.name}</Marquee></strong><button type="button" className="iconbtn radio-player__starbtn" aria-pressed={stationStar} aria-label={stationStar ? `Unstar station ${s.name}` : `Star station ${s.name}`} title={stationStar ? 'Remove this station from your starred stations' : 'Star this station'} onClick={() => { void favouriteStations().then(list => saveFavouriteStations(stationStar ? list.filter(x => x.id !== s.id) : [...list.filter(x => x.id !== s.id), s])).then(() => setStationStar(!stationStar)).catch(() => setMessage('Station favourite could not be saved')); }}><Glyph name={stationStar ? 'heart-filled' : 'heart'} size={16} /></button></div><span className="radio-player__credit"><Marquee>{(() => { // RADIO-ARTIST-001: an identified song opens its catalogue artists (the lead with its provider id);
         // the broadcaster's own text opens the cleaned primary artist, never "JACKSON 5, THE" as written.
         const names = (r.identified ? (t?.artists || [t?.artist]) : [r.broadcast?.artist]).filter((x): x is string => !!x);
         if (!names.length) return null;
@@ -73,9 +95,9 @@ export function RadioPlayer({ docked = false, onOpenArtist, onPlaySong, onDownlo
         return names.map((name, i) => { const target = targetOf(name, i); return <span key={name}>{i > 0 && ', '}{onOpenArtist && target
           ? <button type="button" className="artistlink radio-player__artist" aria-label={`Open the artist ${target.name}`} onClick={() => onOpenArtist(target)}>{name}</button>
           : name}</span>; });
-      })()} · {s.name}</span><small>{stationLocation(s)}{r.broadcast?.state === 'stale' ? ' · last published metadata' : timeline.over ? ' · this song has ended; waiting for the station\'s next title' : ''}</small>
+      })()}{' · '}<b className="radio-player__station">{s.name}</b></Marquee></span><small><Marquee>{stationLocation(s)}{r.broadcast?.state === 'stale' ? ' · last published metadata' : timeline.over ? ' · this song has ended; waiting for the station\'s next title' : ''}</Marquee></small>
       {/* RADIO-GENRES-001: an identified song shows its own genres; a programme or unidentified song shows what the station plays. */}
-      <TagStrip className="radio-player__tags" label="Genres">{(r.identified && r.characteristics ? genreBubbles(r.characteristics) : classifyStation({ tags: s.tags, name: s.name, language: s.language, countryCode: s.countryCode })).map((g, i) => <GenreBubbleView key={i} bubble={g} />)}</TagStrip>
+      <TagStrip className="radio-player__tags" label="Genres">{radioTagBubbles(s, r).map((g, i) => <GenreBubbleView key={i} bubble={g} />)}</TagStrip>
     </div></div>
     <div className="radio-player__timeline">
 
@@ -109,8 +131,8 @@ export function RadioPlayer({ docked = false, onOpenArtist, onPlaySong, onDownlo
     </div>
     </div>
     <div className="radio-player__side">
-      <Volume value={volume} muted={volume === 0} onChange={changeVolume} onToggleMute={() => changeVolume(volume === 0 ? lastVolume.current : 0)} />
-      <div className="radio-player__actions"><button type="button" className="btn radio-player__playlist" aria-label="Add song to playlist" title="Add song to playlist" disabled={!t || !r.broadcast?.title} aria-expanded={menu} onClick={() => { setMenu(!menu); void api.playlists().then(v => setLists(v.lists)).catch(() => setMessage('Playlists could not be loaded')); }}><Glyph name="star" size={16} /><span className="radio-player__playlist-label">Add song to playlist</span></button><button type="button" className="iconbtn radio-player__download" aria-busy={downloading} aria-label={r.identified && t && onDownloadSong ? 'Download current song' : 'Download radio recording'} disabled={downloading || !snap || snap.received <= snap.oldest} title={r.identified && onDownloadSong ? 'Download the full catalogue song to the folder chosen in Settings' : 'Save the retained audio for this item so far — a recording excerpt, not a complete programme'} onClick={async () => {
+      <PlayingArtistHeart artists={heartArtists} variant="icon" />
+      <div className="radio-player__actions"><button type="button" className="btn radio-player__playlist" aria-label="Add song to playlist" title="Add song to playlist" disabled={!t || !r.broadcast?.title} aria-expanded={menu} onClick={() => { setMenu(!menu); void api.playlists().then(v => setLists(v.lists)).catch(() => setMessage('Playlists could not be loaded')); }}><Glyph name="heart" size={16} /><span className="radio-player__playlist-label">Add song to playlist</span></button><button type="button" className="iconbtn radio-player__download" aria-busy={downloading} aria-label={r.identified && t && onDownloadSong ? 'Download current song' : 'Download radio recording'} disabled={downloading || !snap || snap.received <= snap.oldest} title={r.identified && onDownloadSong ? 'Download the full catalogue song to the folder chosen in Settings' : 'Save the retained audio for this item so far — a recording excerpt, not a complete programme'} onClick={async () => {
         setDownloading(true); setMessage('');
         const sessionId = snap?.id;
         try {
@@ -120,7 +142,7 @@ export function RadioPlayer({ docked = false, onOpenArtist, onPlaySong, onDownlo
         finally { setDownloading(false); }
       }}><Glyph name="download" size={18} /></button></div>
     </div>
-    <div className="radio-player__status" role="status">{r.error ? <>{r.error} <button type="button" className="linkbtn" onClick={() => void radioSession.start(s)}>Reconnect</button></> : message}{snap?.dropped && <span> · Older paused audio has left the retained buffer.</span>}</div>
+    <div className="radio-player__status" role="status">{r.error ? <>{radioErrorText(r.error)} <button type="button" className="linkbtn" onClick={() => void radioSession.start(s)}>Reconnect</button></> : message}{snap?.dropped && <span> · Older paused audio has left the retained buffer.</span>}</div>
     {menu && <div className="radio-playlists">{creatingList && <form className="radio-playlists__create" aria-label="Create a radio playlist" onSubmit={e => { e.preventDefault(); void newList(); }}><label>Playlist name<input aria-label="New playlist name" value={newListName} maxLength={80} required autoFocus onInput={e => setNewListName(e.currentTarget.value)} onChange={() => {}} /></label><button type="submit" className="btn" disabled={busy || !newListName.trim()}>Create playlist</button><button type="button" className="btn" onClick={() => setCreatingList(false)}>Cancel new playlist</button></form>}<strong>Add {t?.kind === 'radio-programme' ? 'live programme bookmark' : 'song'} to playlist</strong>{lists.map(l => <button type="button" className="btn" disabled={busy} key={l.id} onClick={() => void playlist(l.id)}>{l.name}</button>)}<button type="button" className="btn" disabled={busy} onClick={() => setCreatingList(true)}>New playlist</button><button type="button" className="btn" onClick={() => setMenu(false)}>Cancel</button></div>}
   </aside>;
 }

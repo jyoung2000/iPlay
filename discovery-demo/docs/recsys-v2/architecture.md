@@ -1,6 +1,6 @@
 # recsys-v2 architecture and rollback
 
-Project: `C:/Users/jalon/projects/AudioWave2.0/AudioWave2.0-claude-now-playing-music-suite-tfzu57/discovery-demo` (remote `https://github.com/jyoung2000/algDemo.git`), branch `recsys-v2` from `22ffd3e`. Research, benchmarks and reports: `D:/MusicRecommendationLab/`. The project remains in its established location; no reset of data or original branch. No new model dependency, paid service, or LLM inference.
+Project: `<workspace-root>/discovery-demo` (remote `https://github.com/jyoung2000/algDemo.git`), branch `recsys-v2` from `22ffd3e`. Research, benchmarks and reports: `<research-workspace>/`. The project remains in its established location; no reset of data or original branch. No new model dependency, paid service, or LLM inference.
 
 ## Running system
 

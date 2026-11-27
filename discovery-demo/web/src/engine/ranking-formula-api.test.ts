@@ -31,7 +31,7 @@ describe('editable discovery formula (RANK-FORMULA-001)', () => {
     for (const formula of ['globalThis.fetch(1)', 'base; alert(1)', 'genre +', '1/0', 'missing_signal', '('.repeat(80) + '1' + ')'.repeat(80), '1+'.repeat(1500) + '1', 4, {}]) {
       expect((await api.handle('PUT', '/api/settings', { ranking_formula: formula, adventurous: 0.1 })).status, String(formula).slice(0, 60)).toBe(400);
     }
-    expect((await api.handle('GET', '/api/settings')).body).toMatchObject({ adventurous: 0.5 });
+    expect((await api.handle('GET', '/api/settings')).body).toMatchObject({ adventurous: 1.0 });
   });
   it('reports a per-song domain fallback without breaking discovery', async () => {
     const { api } = await open();

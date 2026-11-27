@@ -6,7 +6,7 @@ Reviewed 2026-11-01 at pinned shallow-clone commits listed below. Implementation
 2|
 3|**Review date:** 2026-11-01
 4|**Reviewer context:** evaluating for a local-first, deterministic, single-user TypeScript music discovery engine (no server required; source ships publicly under an AGPL-style model).
-5|**Method:** implementation files read directly (not READMEs); all claims cite `path:line` in the local clones at `D:/MusicRecommendationLab/repos/`. All four clones are shallow (`.git/shallow` present), so commit hashes below are tip-of-default-branch at clone time.
+5|**Method:** implementation files read directly (not READMEs); all claims cite `path:line` in the local clones at `<research-workspace>/repos/`. All four clones are shallow (`.git/shallow` present), so commit hashes below are tip-of-default-branch at clone time.
 6|
 7|---
 8|
@@ -178,7 +178,7 @@ Reviewed 2026-11-01 at pinned shallow-clone commits listed below. Implementation
 2|
 3|**Review date:** 2026-11-01
 4|**Reviewer context:** evaluating for a local-first, single-user TypeScript music discovery engine.
-5|**Method:** read implementation files in local clones at `D:/MusicRecommendationLab/repos/`. All claims cite `path:line` in the pinned commit.
+5|**Method:** read implementation files in local clones at `<research-workspace>/repos/`. All claims cite `path:line` in the pinned commit.
 6|
 7|| Repo | URL | Commit | License (read from LICENSE file) |
 8||---|---|---|---|

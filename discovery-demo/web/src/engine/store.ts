@@ -88,7 +88,11 @@ interface VectorRow {
 }
 
 const vkey = (rec: string, model: string, pre: string) => `${rec}\u0000${model}\u0000${pre}`;
-const day = () => new Date().toISOString().slice(0, 10);
+/** ALLOWANCE-ARCH-001: the listener's own calendar day. (The UTC date turned over at 6 pm in Chicago.) */
+const day = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
 
 export interface StoreOptions {
   /** Bytes of recomputable data (cache + vectors) kept; the server's STORAGE.database default is 1 GB. */
@@ -151,7 +155,13 @@ export class Store {
 
   /** Writes reach the backend in order; a failed write surfaces on the next flush(). */
   private write(fn: () => Promise<void>): void {
+    this.changes++;
     this.queue = this.queue.then(fn);
+  }
+  private changes = 0;
+  /** PLAYLIST-DELTA-001: goes up with every change to what is kept, so an answer worked out from it can be reused until then. */
+  get version(): number {
+    return this.changes;
   }
   flush(): Promise<void> {
     const q = this.queue;
@@ -354,9 +364,10 @@ export class Store {
   }
 
   // ---- transfer accounting ----
-  addTransfer(category: string, n: number, d: string = day()): void {
+  /** `lane` (ALLOWANCE-ARCH-001) says what the bytes were for: asked for, playback or background work. */
+  addTransfer(category: string, n: number, d: string = day(), lane?: string): void {
     if (n <= 0) return;
-    const k = `${d}\u0000${category}`;
+    const k = lane ? `${d}\u0000${category}\u0000${lane}` : `${d}\u0000${category}`;
     const total = (this.transfer.get(k) ?? 0) + n;
     this.transfer.set(k, total);
     this.write(() => this.be.put('transfer', k, total));
@@ -365,7 +376,16 @@ export class Store {
     const out: Record<string, number> = {};
     for (const [k, n] of this.transfer) {
       const [dd, cat] = k.split('\u0000');
-      if (dd === d) out[cat!] = n;
+      if (dd === d) out[cat!] = (out[cat!] ?? 0) + n;
+    }
+    return out;
+  }
+  /** Today's bytes by lane; bytes recorded without one (older versions) are 'other'. */
+  transferLanes(d: string = day()): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const [k, n] of this.transfer) {
+      const [dd, , lane = 'other'] = k.split('\u0000');
+      if (dd === d) out[lane] = (out[lane] ?? 0) + n;
     }
     return out;
   }

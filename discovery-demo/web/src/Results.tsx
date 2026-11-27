@@ -1,4 +1,5 @@
-import { useState, type CSSProperties } from 'react';
+import { useRef, useState, type CSSProperties } from 'react';
+import { shadeStep } from './engine/session';
 import { Glyph, type GlyphName } from '@now-playing/aqua-ui/icons';
 import { SimilarGlyph } from './icons';
 import { Marquee } from './Marquee';
@@ -7,14 +8,16 @@ import { ROW_COVER } from './row-cover';
 import './song-row.css';
 import type { ArtistTarget, Characteristics, FeedbackKind, PlaylistSummary, RecItem, Track } from './api';
 import type { CacheState, CardCache } from './engine/queue-controls';
-import { RowPlayButton, playOnDoubleClick } from './RowPlay';
+import { RowDownloadButton, RowPlayButton, playOnDoubleClick } from './RowPlay';
 import { Art } from './Art';
 import { matchRecordings } from './engine/identity';
 import { SaveMenu } from './SaveMenu';
 import { SongStar, inPlaylist } from './SongStar';
 import { SongCredits } from './SongCredits';
 import { SwipeLi } from './useSwipeRemove';
-import { PROVIDER_LABEL, TIER_LABEL, bubbleNote, canPlayHere, classNames, describeCharacteristics, fmtDuration, fmtRelease, genreBubbles, playbackOfTrack, toneLabel, type GenreBubble } from './util';
+import { PROVIDER_LABEL, TIER_LABEL, bubbleNote, canPlayHere, classNames, describeCharacteristics, fmtDuration, fmtRelease, playbackOfTrack, toneLabel, type GenreBubble } from './util';
+import { songTagBubbles } from './engine/display-tags';
+import { ConfirmRemove, confirmRemoveWanted } from './ConfirmRemove';
 
 /**
  * One genre bubble (TAGS-CANON-001: the Taste Picker's colour for its own genre). GENRE-ALL-001: it
@@ -50,6 +53,8 @@ export interface FeedbackFlags {
 }
 
 interface Props {
+  /** Plays this listening session per song key: discovery rows darken a step per play. */
+  plays?: Record<string, number>;
   /** Starting songs: the first rows of the same list, removable and emphasisable. */
   seeds: Track[];
   onRemoveSeed: (key: string) => void;
@@ -83,9 +88,21 @@ interface Props {
  * diversified order; nothing here re-sorts it.
  * Arrow keys / j k move between rows; Enter plays; the row keeps focus when results refresh.
  */
-export function Results({ seeds, onRemoveSeed, onEmphasis, items, focusKey, playingKey, flags, onFocus, onPlay, onPlayTrack, onFeedback, onDownload, onSimilar, similarBusy, cacheOf, lists, onLists, onOpenAlbum, onOpenArtist }: Props) {
+export function Results({ seeds, onRemoveSeed, onEmphasis, items: liveItems, focusKey, playingKey, flags, onFocus, onPlay, onPlayTrack, onFeedback, onDownload, onSimilar, similarBusy, cacheOf, lists, onLists, onOpenAlbum, onOpenArtist, plays }: Props) {
   /** Which row's save menu is showing, by song key. Only one opens at a time. */
   const [saving, setSaving] = useState<string | null>(null);
+  /**
+   * SAVE-MENU-STAY-001 (owner, 2026-11-23: "adding songs to playlist doesnt work"). The playlist menu lives in its
+   * song's row. Liking the song refreshes the queue a few seconds later, and when that refresh dropped or moved the
+   * row the menu vanished with it, mid-choice (measured on the emulator: gone 8 s after it opened, untouched).
+   * While a menu is open the rows are held exactly as they were when it opened — same songs, same order, each
+   * showing its newest state — and the queue catches up the moment the menu closes.
+   */
+  const held = useRef<RecItem[] | null>(null);
+  if (saving === null) held.current = null;
+  else if (!held.current) held.current = liveItems;
+  const items = held.current ? held.current.map((old) => liveItems.find((x) => x.track.key === old.track.key) ?? old) : liveItems;
+  const [confirming, setConfirming] = useState<{ title: string; run: () => void } | null>(null);
 
   /**
    * SEED-DUPE-001: a song that is both a starting song and in the queue below is one song, so it
@@ -106,6 +123,7 @@ export function Results({ seeds, onRemoveSeed, onEmphasis, items, focusKey, play
   };
 
   return (
+    <>
     <ol className="recs" aria-label="Now playing queue">
       {seedRows.map((s) => {
         const strong = (s.emphasis ?? 1) > 1;
@@ -115,11 +133,11 @@ export function Results({ seeds, onRemoveSeed, onEmphasis, items, focusKey, play
         const sf = flags[s.key] ?? {};
         const seedItem = (items.find((x) => x.track.key === s.key) ?? { track: s, rank: 0, reasons: [], playback: playbackOfTrack(s), characteristics: s.characteristics ?? {} }) as RecItem;
         // GENRE-ALL-001: the engine sends a starting song's genres worked out; an older answer has only its tags.
-        const seedBubbles = genreBubbles(s.characteristics ?? ({ genres: (s.tags ?? []).map((g) => g.label || g.name) } as Characteristics));
+        const seedBubbles = songTagBubbles(s.characteristics, s.tags);
         return (
           <SwipeLi key={`seed:${s.key}`} onRemove={() => onRemoveSeed(s.key)} onSwipeLeft={onLists ? () => setSaving(s.key) : undefined} className={classNames('rec', 'rec--seed', strong && 'is-strong', playingKey === s.key && 'is-playing')} onDoubleClick={seedPlayable ? playOnDoubleClick(() => onPlayTrack(s)) : undefined}>
             <span className="rec__rank" aria-hidden="true">
-              {playingKey === s.key ? <Glyph name="speaker" size={12} /> : <Glyph name="star" size={12} />}
+              {playingKey === s.key ? <Glyph name="speaker" size={12} /> : <Glyph name="heart" size={12} />}
             </span>
             <button
               className="rec__art"
@@ -176,11 +194,7 @@ export function Results({ seeds, onRemoveSeed, onEmphasis, items, focusKey, play
               <button className="iconbtn" type="button" aria-label={`Remove ${s.title}`} title="Remove from the queue" onClick={() => onRemoveSeed(s.key)}>
                 <Glyph name="close" size={14} />
               </button>
-              {onDownload && (
-                <button className="iconbtn" type="button" onClick={() => onDownload(s)} aria-label={`Download ${s.title}`} title="Download">
-                  <Glyph name="download" size={14} />
-                </button>
-              )}
+              {onDownload && <RowDownloadButton track={s} cache={cacheOf?.(s.key)} onDownload={onDownload} />}
               {onSimilar && (
                 <button className="iconbtn rec__similar" type="button" onClick={() => onSimilar(s)} disabled={similarBusy} aria-label={`Find similar sound to ${s.title}`} title="Find similar sound">
                   <SimilarGlyph size={16} />
@@ -212,7 +226,7 @@ export function Results({ seeds, onRemoveSeed, onEmphasis, items, focusKey, play
         const playable = canPlayHere(it.playback);
         const facts = describeCharacteristics(it.characteristics);
         // One coloured bubble per genre or subgenre, no separators. The Taste Picker colour sits on the family/subgenre bubble.
-        const bubbles = genreBubbles(it.characteristics);
+        const bubbles = songTagBubbles(it.characteristics, t.tags);
         const toneFact = toneLabel(it.characteristics);
         const cache = cacheOf?.(t.key) ?? null;
         // SEED-DUPE-001: this queue row is also the starting song, so it says so and carries its controls.
@@ -232,6 +246,7 @@ export function Results({ seeds, onRemoveSeed, onEmphasis, items, focusKey, play
             id={rowId(t.key)}
             className={classNames('rec', focusKey === t.key && 'is-focus', playingKey === t.key && 'is-playing', f.dislike && 'is-disliked')}
             data-dl={cache?.state}
+            data-plays={shadeStep(plays?.[t.key] ?? 0) || undefined}
             style={cache ? ({ '--dl': `${cache.progress}%` } as CSSProperties) : undefined}
             tabIndex={focusKey === t.key || (focusKey == null && i === 0) ? 0 : -1}
             aria-current={playingKey === t.key ? 'true' : undefined}
@@ -292,7 +307,7 @@ export function Results({ seeds, onRemoveSeed, onEmphasis, items, focusKey, play
             <div className="rec__sub">
               {seed && (
                 <span className="rec__why1 rec__why1--seed">
-                  <Glyph name="star" size={11} /> Starting song{seedStrong ? ' · counts double' : ''}
+                  <Glyph name="heart" size={11} /> Starting song{seedStrong ? ' · counts double' : ''}
                 </span>
               )}
               <span className="rec__why1">{it.reasons[0]?.text ?? 'Found from your starting songs.'}</span>
@@ -342,19 +357,17 @@ export function Results({ seeds, onRemoveSeed, onEmphasis, items, focusKey, play
                 aria-pressed={Boolean(f.dislike)}
                 onClick={() => {
                   if (f.dislike) { onFeedback(it, 'undislike'); return; }
-                  if (seed) onRemoveSeed(seed.key);
-                  onFeedback(it, 'dislike');
+                  const remove = () => { if (seed) onRemoveSeed(seed.key); onFeedback(it, 'dislike'); };
+                  // REMOVE-CONFIRM-001: removing is for good, so the X asks first (unless told not to).
+                  if (confirmRemoveWanted()) setConfirming({ title: t.title, run: remove });
+                  else remove();
                 }}
                 aria-label={f.dislike ? `Undo dislike of ${t.title}` : `Dislike ${t.title} and remove it from the queue`}
                 title={f.dislike ? 'Disliked' : 'Not for me — remove from the queue'}
               >
                 <Glyph name="close" size={14} />
               </button>
-              {onDownload && (
-                <button className="iconbtn" type="button" onClick={() => onDownload(t)} aria-label={`Download ${t.title}`} title="Download">
-                  <Glyph name="download" size={14} />
-                </button>
-              )}
+              {onDownload && <RowDownloadButton track={t} cache={cache} onDownload={onDownload} />}
               {/* SIMILAR-ICON-001: Find similar sound is an icon in the row, not a line of words. */}
               {onSimilar && (
                 <button className="iconbtn rec__similar" type="button" onClick={() => onSimilar(t)} disabled={similarBusy} aria-label={`Find similar sound to ${t.title}`} title="Find similar sound">
@@ -396,6 +409,10 @@ export function Results({ seeds, onRemoveSeed, onEmphasis, items, focusKey, play
         );
       })}
     </ol>
+    {confirming && (
+      <ConfirmRemove title={confirming.title} onCancel={() => setConfirming(null)} onConfirm={() => { const run = confirming.run; setConfirming(null); run(); }} />
+    )}
+    </>
   );
 }
 

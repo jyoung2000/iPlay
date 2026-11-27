@@ -13,6 +13,10 @@ import { RankingFormulaSettings } from './RankingFormulaSettings';
 import { PROVIDER_LABEL, QUEUE_SIZE_MAX, QUEUE_SIZE_MIN, classNames, fmtBytes } from './util';
 import './discovery-settings.css';
 import { SIMILAR_DEFAULT, SIMILAR_MAX, SIMILAR_MIN } from './engine/similar-sound';
+import { NumberField } from './NumberField';
+import { FavArtistsSettings } from './FavArtists';
+import { VolumeSetting } from './VolumeSetting';
+import { CarKeep } from './CarKeep';
 
 const CAPS: [string, string][] = [
   ['search', 'Search'],
@@ -44,6 +48,14 @@ interface Props {
   sources?: Record<string, { state?: string }>;
   /** FOLDER-IMPORT-001: the app's one download list, so the Downloads section can host it here. */
   downloads?: Downloads;
+}
+
+/** ALLOWANCE-ARCH-001: what today's reading was for, in the order shown. */
+const LANES: [string, string][] = [['interactive', 'you asked for'], ['playback', 'playing songs'], ['background', 'in the background'], ['other', 'earlier today']];
+
+/** Whole minutes until paused background work resumes; never less than one. */
+function resumeMinutes(at: number | null): number {
+  return Math.max(1, Math.round(((at ?? 0) - Date.now() / 1000) / 60));
 }
 
 /** Settings and a discreet status panel. Every badge here comes from a runtime check, never a constant. */
@@ -137,7 +149,8 @@ export function SettingsView({ settings, onSettings, onReset, onResetTaste, onFo
         setHealth(h);
         setStatus(s);
         const freed = h.allowance_refreshed;
-        if (freed) setFreed(freed.cleared_bytes);
+        // ALLOWANCE-ARCH-001: what counts now is the background allowance given back.
+        if (freed) setFreed(freed.restored_bytes ?? freed.cleared_bytes);
         return api.status().then(setStatus, () => undefined);
       })
       .catch((e: Error) => setErr(e.message))
@@ -163,6 +176,7 @@ export function SettingsView({ settings, onSettings, onReset, onResetTaste, onFo
   }, []);
 
   const tr = status?.transfer_today ?? {};
+  const allowance = status?.allowance ?? null;
   const trTotal = Object.values(tr).reduce((a, b) => a + (b || 0), 0);
   // The stored full songs, which only the installed shells have. This is the figure the "Queue audio
   // storage limit" slider governs, so it is the one the meter shows.
@@ -174,6 +188,8 @@ export function SettingsView({ settings, onSettings, onReset, onResetTaste, onFo
     <div className="settings">
       <section className="card" aria-labelledby="set-h">
         <h2 id="set-h">Settings</h2>
+        {/* VOLUME-SETTINGS-001 (owner, 2026-11-22): the app's volume, moved here from the player's controls. */}
+        <VolumeSetting />
         <section className="discovery-settings" aria-labelledby="discovery-h">
           <h3 id="discovery-h">Discovery</h3>
           <div className="discovery-settings__heading">
@@ -236,13 +252,61 @@ export function SettingsView({ settings, onSettings, onReset, onResetTaste, onFo
             <span className="box" aria-hidden="true" />
             <span>Follow my listening mood</span>
           </label>
+          {/* WP6 (rollback switch): mood_plan 'v2' (default) follows without locking in; off = the old 'v1' order. */}
+          <label className="chk discovery-settings__toggle">
+            <input
+              type="checkbox"
+              checked={(settings?.mood_plan ?? 'v2') !== 'v1'}
+              disabled={settings?.mood_queue === false}
+              aria-describedby="mood-plan-help"
+              onChange={(e) => onSettings({ mood_plan: e.target.checked ? 'v2' : 'v1' })}
+            />
+            <span className="box" aria-hidden="true" />
+            <span>Let the mood lean, not lock in</span>
+          </label>
+          <p className="note" id="mood-plan-help">
+            Passive listening leans the queue instead of holding it to one genre, and leaves some room for variety. Turn
+            off to go back to the previous mood order.
+          </p>
           <p className="note" id="mood-queue-help">
             Re-arrange the songs still to come in your now playing queue, here and in Android Auto, to match what you
             are listening to now: its genre, subgenre and sound. Starring a song, Find similar sound and dislikes count
             most. Familiar keeps the queue close to your mood; Adventurous lets in more variety. Albums and saved
             playlists keep their order unless shuffle is on. The song playing and songs you added yourself never move.
           </p>
+          <label className="chk discovery-settings__toggle">
+            <input
+              type="checkbox"
+              checked={settings?.mood_lead ?? true}
+              disabled={settings?.mood_queue === false}
+              aria-describedby="mood-lead-help"
+              onChange={(e) => onSettings({ mood_lead: e.target.checked })}
+            />
+            <span className="box" aria-hidden="true" />
+            <span>Mood leads the queue</span>
+          </label>
+          <p className="note" id="mood-lead-help">
+            While you listen without starring, the first song that fits your mood may move to the front, two places at most.
+          </p>
+          <label className="discovery-settings__field">
+            <span>Longest run of one genre</span>
+            <select
+              value={settings?.genre_run_limit ?? 8}
+              disabled={settings?.mood_queue === false}
+              aria-describedby="genre-run-help"
+              onChange={(e) => onSettings({ genre_run_limit: Number(e.target.value) })}
+            >
+              <option value={0}>Off</option>
+              <option value={3}>3</option>
+              <option value={5}>5</option>
+              <option value={8}>8</option>
+            </select>
+          </label>
+          <p className="note" id="genre-run-help">
+            Applies from the 13th song on, so the first 12 never change. Off leaves the queue's genre order alone.
+          </p>
         </section>
+        <FavArtistsSettings />
         <section className="discovery-settings" aria-labelledby="similar-h">
           <h3 id="similar-h">Similar sound</h3>
           <div className="discovery-settings__heading">
@@ -282,29 +346,42 @@ export function SettingsView({ settings, onSettings, onReset, onResetTaste, onFo
             <span className="box" aria-hidden="true" />
             Compare how songs sound, using 30-second Deezer previews
           </label>
-          <span className="k">Daily download allowance</span>
-          <label className="numrow">
-            <input
-              className="field field--num"
-              type="number"
-              min={5}
-              max={2000}
-              step={5}
-              value={settings?.daily_mb ?? 100}
-              onChange={(e) => onSettings({ daily_mb: Number(e.target.value) })}
-            />{' '}
-            MB per day, for metadata, artwork checks and previews the app downloads itself
-          </label>
+          {/* ALLOWANCE-ARCH-001 (owner, 2026-11-20): the allowance does not apply on Wi-Fi, and never to searching,
+              playing or full-song downloads. It limits background work on mobile data only, and refills all day. */}
+          <span className="k">Mobile data allowance</span>
+          {/* One value cell: the settings grid pairs each label with exactly one item. */}
+          <div>
+            <label className="numrow">
+              <NumberField
+                className="field field--num"
+                min={5}
+                max={2000}
+                step={5}
+                value={settings?.daily_mb ?? 100}
+                onValue={(n) => onSettings({ daily_mb: n })}
+              />{' '}
+              MB a day on mobile data, for finding new songs and tags in the background. It refills through the day.
+            </label>
+            {allowance && (
+              <p className="note" role="status" aria-label="Mobile data allowance now">
+                {allowance.unmetered
+                  ? 'This connection is not metered (Wi-Fi or cable): nothing is limited.'
+                  : allowance.paused
+                    ? `On mobile data now: finding new songs is paused to save data and resumes by itself in about ${resumeMinutes(allowance.resumes_at)} min.`
+                    : `On mobile data now: ${fmtBytes(allowance.level)} of ${fmtBytes(allowance.capacity)} left for background work.`}{' '}
+                Searching, playing and downloading songs are never limited.
+              </p>
+            )}
+          </div>
           <span className="k">Discovery allowance</span>
           <label className="numrow">
-            <input
+            <NumberField
               className="field field--num"
-              type="number"
               min={2}
               max={200}
               step={1}
               value={settings?.request_mb ?? 20}
-              onChange={(e) => onSettings({ request_mb: Number(e.target.value) })}
+              onValue={(n) => onSettings({ request_mb: n })}
             />{' '}
             MB for each discovery batch
           </label>
@@ -441,6 +518,9 @@ export function SettingsView({ settings, onSettings, onReset, onResetTaste, onFo
       {/* FOLDER-IMPORT-001: the Downloads section — download queue plus local folder imports. */}
       {downloads && <DownloadsSettings downloads={downloads} />}
 
+      {/* CAR-KEEP-001: Android only; renders nothing where the phone bridge is absent. */}
+      <CarKeep />
+
       <section className="card" aria-labelledby="src-h">
         <div className="card__head">
           <h2 id="src-h">Sources</h2>
@@ -452,8 +532,8 @@ export function SettingsView({ settings, onSettings, onReset, onResetTaste, onFo
         {freed !== null && (
           <p className="note" role="status">
             {freed > 0
-              ? `Allowance refreshed: ${fmtBytes(freed)} of today\u2019s downloads cleared, so searching and discovery have room again.`
-              : 'Allowance refreshed: today\u2019s allowance was not used up.'}
+              ? `Allowance refreshed: ${fmtBytes(freed)} given back for finding new songs on mobile data.`
+              : 'Allowance refreshed: it was already full.'}
           </p>
         )}
         {quietSources.length > 0 && (
@@ -581,10 +661,15 @@ export function SettingsView({ settings, onSettings, onReset, onResetTaste, onFo
             ))}
             <div>
               <dt>downloaded today</dt>
-              <dd>
-                {fmtBytes(trTotal)} of {fmtBytes(status.transfer_daily_cap)}
-              </dd>
+              <dd>{allowance ? fmtBytes(trTotal) : `${fmtBytes(trTotal)} of ${fmtBytes(status.transfer_daily_cap)}`}</dd>
             </div>
+            {/* ALLOWANCE-ARCH-001: what today's reading was for. Only the last of these draws on the allowance. */}
+            {allowance && LANES.filter(([lane]) => (allowance.today[lane] ?? 0) > 0).map(([lane, label]) => (
+              <div key={`lane-${lane}`}>
+                <dt>· {label}</dt>
+                <dd>{fmtBytes(allowance.today[lane])}</dd>
+              </div>
+            ))}
             {Object.entries(tr).map(([k, v]) => (
               <div key={`t-${k}`}>
                 <dt>· {k}</dt>

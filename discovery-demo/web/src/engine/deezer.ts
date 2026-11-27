@@ -44,6 +44,12 @@ export async function cached<T>(store: Store | undefined, key: string, kind: str
   }
 }
 
+/** GENRE-WORD-001: Deezer's own compound genre names a colour may ask for, as fold() renders them. */
+const DEEZER_GENRE_NAMES = new Set([
+  'soul and funk', 'chill out trip hop lounge', 'rap hip hop', 'r and b',
+  'latin music', 'african music', 'asian music', 'brazilian music', 'indian music', 'films games',
+]);
+
 export class Deezer {
   readonly name = 'deezer';
   readonly label = 'Deezer';
@@ -163,6 +169,19 @@ export class Deezer {
     return cached(this.store, `dz:arttop:${artistId}:${limit}`, 'artist', 6 * H, () => this.tracksOf(`/artist/${artistId}/top?limit=${limit}`, c));
   }
 
+  /** DISCOVER-BREADTH-001: an artist's top songs, each with the artists Deezer credits on it. */
+  artistTopCredits(artistId: string, limit: number, c: Ctx = {}): Promise<{ track: Track; credits: { id: string; name: string }[] }[]> {
+    return cached(this.store, `dz:arttopc:${artistId}:${limit}`, 'artist', 6 * H, async () => {
+      const d = await this.get(`/artist/${artistId}/top?limit=${limit}`, c);
+      return ((d.data as Json[]) ?? []).map((x) => ({
+        track: this.toTrack(x),
+        credits: ((x.contributors as Json[] | undefined) ?? [])
+          .map((k) => ({ id: k?.id == null ? '' : String(k.id), name: k?.name == null ? '' : String(k.name) }))
+          .filter((k) => /^\d+$/.test(k.id) && k.name !== '' && k.name !== 'undefined'),
+      }));
+    });
+  }
+
   /** The Deezer artist with exactly this name (the most followed when several share it), or null. A track search for
    *  `artist:"Future"` is fuzzy (it answered Future Islands and Deerhoof), so names go through the artist search. */
   artistByName(name: string, c: Ctx = {}): Promise<{ id: string; name: string } | null> {
@@ -171,6 +190,25 @@ export class Deezer {
       const same = ((d.data as Json[]) ?? []).filter((a) => fold(String(a.name ?? '')) === fold(name));
       same.sort((a, b) => Number(b.nb_fan ?? 0) - Number(a.nb_fan ?? 0));
       return same[0] ? { id: String(same[0].id), name: String(same[0].name) } : null;
+    });
+  }
+
+  /**
+   * ARTIST-SIZE-001: an artist's Deezer followers (nb_fan), by Deezer id when known, else the most followed artist of
+   * exactly this name; null when Deezer has no such artist. Sizes change slowly, so an answer is kept a week.
+   */
+  artistFans(id: string | null, name: string, c: Ctx = {}): Promise<number | null> {
+    const dz = id && /^\d{1,15}$/.test(id) ? id : null;
+    if (!dz && !fold(name)) return Promise.resolve(null);
+    return cached(this.store, dz ? `dz:artfans:${dz}` : `dz:artfans:n:${fold(name)}`, 'artist', 7 * 24 * H, async () => {
+      if (dz) {
+        const d = await this.get(`/artist/${dz}`, c);
+        return typeof d.nb_fan === 'number' ? d.nb_fan : null;
+      }
+      const d = await this.get(`/search/artist?q=${encodeURIComponent(name)}&limit=10`, c);
+      const same = ((d.data as Json[]) ?? []).filter((a) => fold(String(a.name ?? '')) === fold(name) && typeof a.nb_fan === 'number');
+      same.sort((a, b) => Number(b.nb_fan) - Number(a.nb_fan));
+      return same[0] ? Number(same[0].nb_fan) : null;
     });
   }
 
@@ -199,6 +237,10 @@ export class Deezer {
       for (const g of (d.data as Json[]) ?? []) {
         const canon = G.normalize(g.name ?? '');
         if (canon && g.id && !(canon in out)) out[canon] = Number(g.id);
+        // GENRE-WORD-001: Deezer's own compound names ("Soul & Funk") are not in our genre table, so a
+        // colour could never find their id. Those few are also keyed by name. Unknown names stay dropped.
+        const raw = fold(g.name ?? '');
+        if (raw && g.id && DEEZER_GENRE_NAMES.has(raw) && !(raw in out)) out[raw] = Number(g.id);
       }
       return out;
     });

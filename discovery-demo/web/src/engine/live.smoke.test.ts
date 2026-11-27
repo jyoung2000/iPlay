@@ -1,6 +1,9 @@
 // Live end-to-end run of the in-app engine against the real services. Skipped unless AIRWAVE_LIVE=1.
 // AIRWAVE_AUDIO=1 also loads the real ONNX model; AIRWAVE_OUT=<file> receives a readable report.
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { Encoder, type OrtLike } from './encoder';
 import { LocalApi } from './local-api';
@@ -40,7 +43,7 @@ describe.skipIf(!live)('LocalApi live', () => {
     // Windows shell's spotDL search, run for real (the shell is the only place spotDL exists).
     const { createRequire } = await import('node:module');
     const shell = createRequire(import.meta.url)('../../../windows/downloads.cjs') as { createDownloads: (c: Record<string, string>) => { handle: (r: Record<string, unknown>) => { songs: unknown[] } } };
-    const dl = shell.createDownloads({ toolsDir: 'C:/Users/jalon/projects/AudioWave2.0/AudioWave2.0-claude-now-playing-music-suite-tfzu57/discovery-demo/.data/tools', saveDir: 'C:/tmp-unused', tempRoot: 'C:/Users/jalon/AppData/Local/hermes/cache/scratch/spotjobs' });
+    const dl = shell.createDownloads({ toolsDir: fileURLToPath(new URL('../../../.data/tools/', import.meta.url)), saveDir: resolve(tmpdir(), 'airwave-unused'), tempRoot: resolve(tmpdir(), 'spotjobs') });
     const { searchSpotify } = await import('./spotify-search');
     const api = new LocalApi({ store, port, encoder: enc, spotifySearch: () => (q: string, n: number) => searchSpotify(async (query, k) => dl.handle({ op: 'spotify-search', query, limit: k }).songs, q, n) as never });
     try {

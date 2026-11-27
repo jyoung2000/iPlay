@@ -98,3 +98,22 @@ it('shows a finished folder as a folder button only (LIST-FOLDER-002), and a fai
   await set({ phase: 'running', error: 'Disk full' });
   expect(host.querySelector('[role="status"]')!.textContent).toContain('The folder could not be written: Disk full');
 });
+
+// ARTIST-SAVE-ICON-001 (owner, 2026-11-22): "dont have the download to folder text on the [artist] page".
+it('as an icon, it shows no words but still says what it does', async () => {
+  await act(async () => root.render(<ListSaveButton icon tracks={tracks} kind="list" name="OsamaSon" label="every song by OsamaSon" />));
+  const b = host.querySelector<HTMLButtonElement>('button.list-save__go')!;
+  expect(b.textContent?.trim()).toBe('');
+  expect(b.getAttribute('aria-label')).toBe('Download to folder: every song by OsamaSon');
+  expect(b.className).toMatch(/iconbtn/);
+});
+
+// ALBUM-TIDY-001 (owner, 2026-11-22): "on the album page turn the download to folder icon into just a download icon".
+it('as an icon, it is the arrow alone until the folder holds a song', async () => {
+  await act(async () => root.render(<ListSaveButton icon tracks={tracks} kind="album" name="Ken Carson - A Great Chaos" label="the album A Great Chaos" />));
+  expect([...host.querySelectorAll('button')].map((b) => b.className)).toEqual(['iconbtn list-save__go']);
+  expect(folder()).toBeNull();
+  await set({ held: 1 });
+  expect(folder()).toBeTruthy();
+  expect(folder().disabled).toBe(false);
+});

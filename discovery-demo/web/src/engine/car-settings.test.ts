@@ -23,7 +23,7 @@ describe('car settings on the page', () => {
 
   it('the phone’s discovery level and mood switch go to the engine for the car’s buttons', () => {
     expect(discoveryForEngine({ adventurous: 0.25, mood_queue: false })).toEqual({ op: 'settings', adventurous: 0.25, mood_queue: false });
-    expect(discoveryForEngine({})).toEqual({ op: 'settings', adventurous: 0.5, mood_queue: true });
+    expect(discoveryForEngine({})).toEqual({ op: 'settings', adventurous: 1.0, mood_queue: true });
     expect(discoveryForEngine({ adventurous: 7 })!.adventurous).toBe(1);
     expect(discoveryForEngine(null)).toBeNull();
   });

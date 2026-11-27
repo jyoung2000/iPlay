@@ -1,6 +1,6 @@
 import { api, type Characteristics, type Track } from '../api';
-import { parseTitle } from './identity';
-import { RadioDirectory, parseBroadcast, freshBroadcast, heardCredit, pickShuffleIndex, radioItemClock, songStartFromFingerprint, type Broadcast, type RadioStation } from './radio';
+import { fold, parseTitle } from './identity';
+import { RadioDirectory, pickUnseenStation, parseBroadcast, freshBroadcast, heardCredit, radioItemClock, carRadioClock, icySongStart, songStartFromFingerprint, type Broadcast, type RadioStation } from './radio';
 import { publisherBroadcast, icecastBroadcast } from './radio-feeds';
 import { geocodePlace, type RadioPlace } from './radio-places';
 import { normaliseRadioArtist, radioArtistKey, radioSongFits } from './radio-artist';
@@ -8,7 +8,7 @@ import { ListenMeter } from '../util';
 import { radioOutput } from '../audio-engine';
 import { songFromTrack, type NativeSong } from './media-native';
 
-export interface RadioSnapshot { id: string; stationId: string; station?: RadioStation; paused: boolean; position: number; received: number; oldest: number; heard: number; dropped: boolean; state: string; error: string | null; native: boolean; pcm?: string }
+export interface RadioSnapshot { id: string; stationId: string; station?: RadioStation; paused: boolean; position: number; received: number; oldest: number; heard: number; dropped: boolean; state: string; error: string | null; native: boolean; pcm?: string; /** RADIO-ICY-CLOCK-001: in-band title changes on the ring clock (native rings). */ icy?: { at: number; title: string }[] }
 /** RADIO-FIRST-START-001: the first start after an install waits while the phone unpacks its bundled decoder. */
 export const radioNativeTimeout = (op: unknown): number => (op === 'start' ? 60000 : op === 'metadata' || op === 'request' ? 20000 : 15000);
 export async function radioNative<T = RadioSnapshot>(q: Record<string, unknown>): Promise<T> {
@@ -20,6 +20,16 @@ export const radioDirectory = new RadioDirectory(async u => (await radioNative<{
 export const radioGeocode = (query: string) => geocodePlace(query, async u => (await radioNative<{ text: string }>({ op: 'request', url: u })).text);
 const metadata = new Map<string, Broadcast>();
 const probing = new Map<string, Promise<Broadcast>>();
+/** RADIO-SMOOTH-001: seconds of radio audio the Windows page keeps scheduled in Web Audio. It is the only audio that
+ *  survives the page being busy (0.65 s left a gap on every block of 0.7 s or more). Pause hands it back to the ring. */
+export const RADIO_AHEAD_S = 2.5;
+/** RADIO-TITLE-INBAND-001: how often a station's song feed is asked (it was 10 s). Stations with titles inside their
+ *  stream follow those instead, the moment the audio reaches them. */
+export const RADIO_META_EVERY_MS = 5000;
+const foldTitle = (s: string | null | undefined) => fold(s || '');
+/** The same song or item, however each source spells it ("Womack & Womack" / "Womack And Womack", case). */
+function sameItem(a: Broadcast, b: Broadcast): boolean { return a.kind === b.kind && foldTitle(a.title) === foldTitle(b.title) && foldTitle(a.artist) === foldTitle(b.artist); }
+export const radioWantsPull = (scheduledAhead: number) => scheduledAhead < RADIO_AHEAD_S;
 /** `maxAge`: how old a remembered answer may be and still be reused (RADIO-LIVE-001 asks for under 15 s). */
 export async function stationMetadata(s: RadioStation, force = false, maxAge = 20000): Promise<Broadcast> {
   const old = metadata.get(s.id); if (!force && old && Date.now() - old.checkedAt < maxAge) return freshBroadcast(old);
@@ -95,18 +105,18 @@ export async function matchSongBroadcast(b: Broadcast, opts?: { force?: boolean 
 }
 class RadioSession {
   private value: RadioState = { station: null, snapshot: null, broadcast: null, track: null, identified: false, identifying: false, analysis: '', error: null, shuffle: false };
-  private listeners = new Set<() => void>(); private generation = 0; private markers: Marker[] = []; private credited = new Map<string, { kind: 'qualified' | 'complete'; coverage: number }>(); private timer: ReturnType<typeof setTimeout> | null = null; private metaTimer: ReturnType<typeof setInterval> | null = null;
+  private listeners = new Set<() => void>(); private generation = 0; private markers: Marker[] = []; private icySeen = new Set<string>(); private hasIcy = false; private credited = new Map<string, { kind: 'qualified' | 'complete'; coverage: number }>(); private timer: ReturnType<typeof setTimeout> | null = null; private metaTimer: ReturnType<typeof setInterval> | null = null;
   async restore() {
     if (this.value.station) return;
     try { const snap = await radioNative({ op: 'state' }); if (snap.native && snap.station) this.adopt(snap); } catch { /* no active native session */ }
   }
   private adopt(snap: RadioSnapshot) {
     if (!snap.station) return;
-    const gen = ++this.generation; this.clear(); this.markers = []; this.credited.clear(); this.currentMarker = null; this.itemHeard = 0; this.lastIdentify = 0;
+    const gen = ++this.generation; this.clear(); this.markers = []; this.icySeen.clear(); this.hasIcy = false; this.credited.clear(); this.currentMarker = null; this.itemHeard = 0; this.lastIdentify = 0;
     this.identifyAfter = Infinity; this.overrunAfter = 0;
     this.put({ station: snap.station, snapshot: snap, track: null, broadcast: null, identified: false, characteristics: null, identifying: false, error: snap.error, analysis: 'Reading current radio programme', songStart: null });
     void favouriteStations().then(v => { if (!this.stationList.length) this.stationList = v; });
-    void this.refreshMetadata(gen); this.metaTimer = setInterval(() => void this.refreshMetadata(gen), 10000); void this.poll(gen);
+    void this.refreshMetadata(gen); this.metaTimer = setInterval(() => void this.refreshMetadata(gen), RADIO_META_EVERY_MS); void this.poll(gen);
   }
   private lastNativeMetadata = '';
   /** RADIO-CLOCK-001: fingerprint again once this much of the ring has arrived (a new song's own audio fills a window). */
@@ -118,18 +128,44 @@ class RadioSession {
   setStations(stations: RadioStation[]) { this.stationList = stations; }
   canSkip(dir: 1 | -1): boolean {
     const i = this.stationList.findIndex(s => s.id === this.value.station?.id);
-    if (this.value.shuffle) return this.stationList.length > 1 && i >= 0;
+    if (this.value.shuffle) return !!this.value.station && (this.stationList.some(s => s.id !== this.value.station?.id) || this.worldPool.length > 0 || i >= 0);
     return i >= 0 && i + dir >= 0 && i + dir < this.stationList.length;
   }
   /** RADIO-UI-005: with shuffle on, Next/Previous tune a random OTHER station from the tuned list. */
   async skip(dir: 1 | -1) {
-    const i = this.stationList.findIndex(s => s.id === this.value.station?.id);
-    const next = this.value.shuffle ? this.stationList[pickShuffleIndex(this.stationList.length, i, Math.random)] : this.stationList[i + dir];
-    if (next) await this.start(next);
+    const current = this.value.station?.id;
+    if (!this.value.shuffle) {
+      const i = this.stationList.findIndex(s => s.id === current);
+      const next = this.stationList[i + dir];
+      if (next) await this.start(next);
+      return;
+    }
+    // RADIO-SHUFFLE-NO-REPEAT-001 (owner, 2026-11-25): no station twice in a shuffle round; when the list is used up,
+    // new stations come from a random page of the whole directory (A-Z, no filter). Only when even that fails does a
+    // new round start, and never on the station on air.
+    if (current) this.shuffleSeen.add(current);
+    const pick = () => pickUnseenStation([...this.stationList, ...this.worldPool], this.shuffleSeen, current, Math.random);
+    let next = pick();
+    for (let tries = 0; !next && tries < 3; tries++) {
+      try {
+        const page = await radioDirectory.worldPage();
+        const ids = new Set(this.worldPool.map(s => s.id));
+        this.worldPool = [...this.worldPool, ...page.filter(s => !ids.has(s.id))].slice(-2000);
+      } catch { /* directory down: try again, then a new round */ }
+      next = pick();
+    }
+    if (!next) { this.shuffleSeen = new Set(current ? [current] : []); next = pick(); }
+    if (!next) return;
+    this.shuffleSeen.add(next.id);
+    await this.start(next);
   }
+  /** RADIO-SHUFFLE-NO-REPEAT-001: stations played this shuffle round, and the directory stations loaded for it. */
+  private shuffleSeen = new Set<string>();
+  private worldPool: RadioStation[] = [];
   /** Shared with the native layer so Android Auto's shuffle button and the phone button agree. */
   private shuffleSync = 0;
   async setShuffle(on: boolean) {
+    if (on !== this.value.shuffle) { this.shuffleSeen = new Set(this.value.station ? [this.value.station.id] : []); this.worldPool = []; }
     this.put({ shuffle: on });
     if (!this.value.snapshot) return;
     // A state poll already in flight still carries the OLD flag; don't let it undo this toggle.
@@ -144,7 +180,7 @@ class RadioSession {
   private put(v: Partial<RadioState>) { this.value = { ...this.value, ...v }; this.listeners.forEach(l => l()); }
   async start(s: RadioStation) {
     void this.credit(true); // RADIO-TASTE-001: moving straight to another station still counts what was heard on this one
-    const gen = ++this.generation; this.clear(); this.markers = []; this.credited.clear(); this.lastHeard = 0; this.itemHeard = 0; this.lastItem = ''; this.lastIdentify = 0; this.currentMarker = null;
+    const gen = ++this.generation; this.clear(); this.markers = []; this.icySeen.clear(); this.hasIcy = false; this.credited.clear(); this.lastHeard = 0; this.itemHeard = 0; this.lastItem = ''; this.lastIdentify = 0; this.currentMarker = null;
     if (!this.stationList.some(x => x.id === s.id)) this.stationList = [s, ...this.stationList];
     this.identifyAfter = Infinity; this.overrunAfter = 0;
     this.put({ station: s, snapshot: null, broadcast: null, track: null, identified: false, characteristics: null, error: null, analysis: 'Waiting for broadcast metadata', identifying: false, songStart: null, timeshifted: false });
@@ -154,7 +190,7 @@ class RadioSession {
       const snap = await radioNative({ op: 'start', stationId: s.id, name: s.name, title: s.name, url: s.url, station: s, stations: this.stationList });
       if (gen !== this.generation) return;
       this.put({ snapshot: snap }); if (snap.native) { this.graph?.dispose(); this.graph = null; }
-      void this.refreshMetadata(gen); this.metaTimer = setInterval(() => void this.refreshMetadata(gen), 10000); void this.poll(gen);
+      void this.refreshMetadata(gen); this.metaTimer = setInterval(() => void this.refreshMetadata(gen), RADIO_META_EVERY_MS); void this.poll(gen);
     } catch (e) { if (gen === this.generation) this.put({ error: e instanceof Error ? e.message : 'Radio could not start' }); }
   }
   private clear() { if (this.timer) clearTimeout(this.timer); if (this.metaTimer) clearInterval(this.metaTimer); this.timer = null; this.metaTimer = null; this.flushAudio(); this.graph?.dispose(); this.graph = null; }
@@ -179,12 +215,14 @@ class RadioSession {
     const m = [...this.markers].reverse().find(x => x.at <= snap.position + 0.5) || this.markers[0]; if (!m) return;
     if (this.currentMarker !== m) { void this.credit(true); this.itemHeard = 0; this.lastItem = m.broadcast.title; this.currentMarker = m;
  (m.meter ??= new ListenMeter()).seeked(snap.position); }
+    // RADIO-ICY-CLOCK-001: a song that began while listening starts where its title changed in the audio (a fingerprint still wins).
+    if (m.startAt == null) { const at = icySongStart(snap.icy, m.broadcast, m.at); if (at !== null) m.startAt = at; }
     if (snap.native) {
       // CAR-RADIO-CONTROLS-001: the car's star, playlist pick and elapsed/length follow what the phone shows.
       // A published start drifts with network bursts if recomputed, so it is pinned once per item (as the phone's bufferOffset is).
       if (m.carStart === undefined && snap.received > 0 && m.broadcast.startedAt) m.carStart = radioItemClock(m.broadcast, null, false, snap).start;
-      const clock = radioItemClock(m.broadcast, m.track, m.identified, snap, Date.now(), m.startAt ?? null);
-      const update = radioNowPlaying(snap.id, m, this.value.station, { start: m.startAt != null ? clock.start : m.carStart ?? null, duration: clock.duration });
+      // CAR-RADIO-CLOCK-002: the phone's rules: no clock when the start is unknown, "waiting" once the song is over.
+      const update = radioNowPlaying(snap.id, m, this.value.station, carRadioClock(m.broadcast, m.track, m.identified, snap, Date.now(), m.startAt ?? null, m.carStart ?? null));
       const key = JSON.stringify(update);
       if (this.lastNativeMetadata !== key) { this.lastNativeMetadata = key; void radioNative(update).catch(() => { if (this.lastNativeMetadata === key) this.lastNativeMetadata = ''; }); }
     }
@@ -196,7 +234,7 @@ class RadioSession {
   private async poll(gen: number) {
     const s = this.value.snapshot; if (gen !== this.generation || !s) return;
     try {
-      const room = this.graph ? this.nextAt - this.graph.ctx.currentTime < 0.65 : false;
+      const room = this.graph ? radioWantsPull(this.nextAt - this.graph.ctx.currentTime) : false;
       const snap = await radioNative({ op: !s.native && room ? 'pull' : 'state', ...(!s.native ? { id: s.id } : {}) }); if (gen !== this.generation) return;
       if (snap.native && snap.id !== s.id) { this.adopt(snap); return; }
       if (snap.pcm && this.graph && !snap.paused) {
@@ -206,7 +244,7 @@ class RadioSession {
       // Native credit counts frames actually consumed, not wall clock. Ignore a counter reset.
       this.lastHeard = snap.heard;
       const nativeShuffle = (snap as { shuffle?: unknown }).shuffle;
-      this.put({ snapshot: snap, ...(typeof nativeShuffle === 'boolean' && this.shuffleSync === 0 && nativeShuffle !== this.value.shuffle ? { shuffle: nativeShuffle } : {}), ...(snap.error ? { error: snap.error } : {}) }); this.selectItem();
+      this.put({ snapshot: snap, ...(typeof nativeShuffle === 'boolean' && this.shuffleSync === 0 && nativeShuffle !== this.value.shuffle ? { shuffle: nativeShuffle } : {}), ...(snap.error ? { error: snap.error } : {}) }); this.applyIcy(snap, gen); this.selectItem();
       if (this.currentMarker) { const meter = this.currentMarker.meter ??= new ListenMeter(); meter.tick(snap.position, !snap.paused && this.value.identified && snap.heard > 0); this.itemHeard = meter.coverage; }
       if (this.itemHeard >= 30) void this.credit();
       const due = Date.now() - this.lastIdentify > 60000 && (!this.value.identified || this.value.broadcast?.kind === 'song');
@@ -250,17 +288,58 @@ class RadioSession {
     void api.feedback(kind, track, { event_id: kind === 'complete' ? `${noted}:full` : noted, ...(kind === 'complete' ? { supersedes: noted } : {}), listened: coverage, coverage, duration: track.duration, medium: 'radio', origin: 'radio', confidence: 0.7 }).catch(() => {});
   }
   private async refreshMetadata(gen: number) {
-    // RADIO-FEED-FUTURI-001: asked every 10 s so a new song shows within seconds of starting on air.
-    const s = this.value.station; if (!s || gen !== this.generation) return; const b = await stationMetadata(s, false, 9000); if (gen !== this.generation) return;
+    // RADIO-FEED-FUTURI-001 / RADIO-TITLE-INBAND-001: asked every 5 s so a new song shows within seconds of starting on air.
+    const s = this.value.station; if (!s || gen !== this.generation) return; const b = await stationMetadata(s, false, RADIO_META_EVERY_MS - 500); if (gen !== this.generation) return;
+    // RADIO-TITLE-INBAND-001: with titles inside the stream, a feed (27 s late on V103, 30 s to 3 minutes early elsewhere)
+    // never names the song; it only adds its length, start and artwork to the song the stream names.
+    if (this.hasIcy) {
+      const cur = this.currentMarker;
+      if (cur && sameItem(cur.broadcast, b)) { cur.broadcast = { ...cur.broadcast, duration: b.duration ?? cur.broadcast.duration ?? null, artwork: b.artwork ?? cur.broadcast.artwork ?? null, checkedAt: b.checkedAt }; this.selectItem(); return; }
+      // Streams do not name every song (V103 sent no title for 4 minutes over a song change). A feed's song is taken once
+      // the stream's song has run past its length, or the stream's item has not been a song for 45 s.
+      const pos = this.value.snapshot?.position ?? 0, len = cur?.track?.duration ?? cur?.broadcast.duration ?? null;
+      const over = !cur || (cur.broadcast.kind !== 'song' ? pos - cur.at > 45 : typeof cur.startAt === 'number' && typeof len === 'number' && len > 0 && pos > cur.startAt + len + 5);
+      if (!over || b.kind !== 'song' || b.state !== 'current') return;
+    }
     const last = this.markers[this.markers.length - 1];
     if (last?.broadcast.title === b.title && last.broadcast.artist === b.artist) { last.broadcast = b; this.selectItem(); return; }
     // RADIO-NO-BACKTRACK-001 (owner): a title this session already moved past (a newer title or the fingerprint named the
     // next song) comes from a source running behind the air. It is not a new song; never step back to it.
     if (this.markers.slice(0, -1).some((m) => m.broadcast.title === b.title && m.broadcast.artist === b.artist)) return;
-    const marker: Marker = { at: last ? this.value.snapshot?.received || 0 : 0, broadcast: b, track: null, identified: false, heardAt: 0 }; this.markers.push(marker); this.selectItem();
+    // Shown as soon as it changes: placing it at the newest audio held it back by the whole cushion (now 5 s).
+    const marker: Marker = { at: last ? Math.max(last.at, this.value.snapshot?.position || 0) : 0, broadcast: b, track: null, identified: false, heardAt: 0 }; this.markers.push(marker); this.selectItem();
     // RADIO-CLOCK-001: the title changed while listening. Its clock is measured once 13 s of the new item have been played
     // (a 12 s fingerprint window that no longer holds the end of the previous song).
     if (last && b.kind === 'song' && b.state === 'current') this.identifyAfter = marker.at + 13;
+    await this.matchTrack(marker, gen);
+  }
+  /** RADIO-TITLE-INBAND-001: the playing stream's own titles (both shells place them on the ring clock). Each new one
+   *  becomes the item from the ring second where its audio begins; a change also starts the song's clock there. */
+  private applyIcy(snap: RadioSnapshot, gen: number) {
+    const marks = (snap as { icy?: { at: number; title: string; first?: boolean }[] }).icy; if (!Array.isArray(marks) || !marks.length) return;
+    this.hasIcy = true;
+    for (const m of marks) {
+      if (!Number.isFinite(m?.at) || typeof m.title !== 'string') continue;
+      const key = `${Math.round(m.at * 10)}|${m.title}`; if (this.icySeen.has(key)) continue; this.icySeen.add(key);
+      const b = parseBroadcast(m.title, 'Stream title');
+      const cur = [...this.markers].reverse().find(x => x.at <= m.at + 0.5);
+      // An ad marker or station imaging left in the stream from before the connection names nothing playing now.
+      if (m.first && b.kind !== 'song' && cur) continue;
+      if (cur && sameItem(cur.broadcast, b)) {
+        // The feed named it first; the stream says where it really began.
+        if (!m.first && cur.broadcast.source !== 'Audio fingerprint' && cur.startAt == null) { if (b.kind === 'song') cur.startAt = m.at; }
+        continue;
+      }
+      // A title a source behind the air placed later is this same item; the stream's place for it wins.
+      this.markers = this.markers.filter(x => !(x.at > m.at && !x.identified && sameItem(x.broadcast, b)));
+      const marker: Marker = { at: m.at, broadcast: b, track: null, identified: false, heardAt: 0, startAt: !m.first && b.kind === 'song' ? m.at : null };
+      this.markers.push(marker); this.markers.sort((x, y) => x.at - y.at);
+      if (!m.first && b.kind === 'song') this.identifyAfter = m.at + 13;
+      void this.matchTrack(marker, gen);
+    }
+  }
+  private async matchTrack(marker: Marker, gen: number) {
+    const b = marker.broadcast;
     if (b.kind !== 'song' || b.state !== 'current' || !b.artist) return;
     try { const r = await api.search(`${normaliseRadioArtist(b.artist) ?? b.artist} ${b.title}`); const t = r.results.find(t => radioSongFits(t, b)); /* RADIO-ARTIST-001: "JACKSON 5, THE" is the catalogue's "Jackson 5" */ if (gen !== this.generation || !t) return; marker.track = t; marker.identified = true; this.put({ analysis: 'Matched broadcaster title to catalogue' }); this.selectItem(); void this.genres(t, marker, gen); } catch { /* published programme/title stays visible, no speculative match */ }
   }
@@ -289,6 +368,9 @@ class RadioSession {
       if (!marker || !sameItem) {
         // A song that began inside the retained audio starts exactly where it was measured to start.
         const at = startAt !== null && startAt > Math.max(snapshot.oldest, marker?.at ?? 0) ? startAt : Math.max(0, heardAt - sample.seconds);
+        // RADIO-TITLE-INBAND-001: the stream's title for this song can arrive after its audio (10-19 s on KEXP); the song
+        // starts where the fingerprint measured it, so a later copy of it from a title is dropped.
+        this.markers = this.markers.filter(x => !(x.at > at && !x.identified && x.broadcast.kind === 'song' && radioSongFits(t, x.broadcast)));
         marker = { at, broadcast: b, track: t, identified: true, heardAt: 0, startAt }; this.markers.push(marker); this.markers.sort((a, b) => a.at - b.at);
       } else {
         marker.track = t; if (marker.broadcast.state !== 'current' || marker.broadcast.kind !== 'song') marker.broadcast = b; marker.identified = true;
@@ -308,7 +390,13 @@ export const radioSession = new RadioSession();
  * unmatched titles never get a star (programmes never train taste). `start` is where the item began
  * on the ring clock and `duration` its length, both seconds or null when not known.
  */
-export function radioNowPlaying(id: string, m: { broadcast: Broadcast; track: Track | null; identified: boolean }, station: RadioStation | null, clock: { start: number | null; duration: number | null }) {
+export function radioNowPlaying(id: string, m: { broadcast: Broadcast; track: Track | null; identified: boolean }, station: RadioStation | null, clock: { start: number | null; duration: number | null; over?: boolean }) {
+  // CAR-RADIO-CLOCK-002: the feed still names a song that has ended (talk or ads after it). Say so, as the phone does.
+  if (clock.over) {
+    const last = m.track?.title || m.broadcast.title, by = m.track?.artists?.join(', ') || m.broadcast.artist;
+    return { op: 'nowplaying' as const, id, title: 'Waiting for the next song', artist: last ? `Last song: ${last}${by ? ` – ${by}` : ''}` : station?.name || '',
+      artwork: station?.image || m.broadcast.artwork || '', song: null, track: null, start: null, duration: null };
+  }
   const named = m.identified && m.track && m.track.provider !== 'radio' ? m.track : null;
   let track: Track | null = named;
   try { if (named && JSON.stringify(named).length > 16_000) track = null; } catch { track = null; }
@@ -324,6 +412,6 @@ if (typeof window !== 'undefined') {
     return { analysis: v.analysis, identifying: v.identifying, identified: v.identified, songStart: v.songStart ?? null, error: v.error,
       broadcast: v.broadcast && { title: v.broadcast.title, artist: v.broadcast.artist, kind: v.broadcast.kind, state: v.broadcast.state, source: v.broadcast.source },
       track: v.track && { key: v.track.key, title: v.track.title, duration: v.track.duration ?? null },
-      snapshot: v.snapshot && { position: v.snapshot.position, received: v.snapshot.received, oldest: v.snapshot.oldest, paused: v.snapshot.paused } };
+      snapshot: v.snapshot && { position: v.snapshot.position, received: v.snapshot.received, oldest: v.snapshot.oldest, paused: v.snapshot.paused, icy: (v.snapshot as { icy?: unknown }).icy ?? null } };
   } } });
 }

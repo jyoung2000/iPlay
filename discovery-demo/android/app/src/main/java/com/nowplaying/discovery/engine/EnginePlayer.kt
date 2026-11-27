@@ -1,5 +1,8 @@
 package com.nowplaying.discovery.engine
 
+import com.nowplaying.discovery.BuildConfig
+import com.nowplaying.discovery.RadioArt
+
 import android.content.BroadcastReceiver
 import android.content.Context
 import com.nowplaying.discovery.RadioCatalog
@@ -17,6 +20,7 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.SimpleBasePlayer
@@ -122,7 +126,7 @@ class EnginePlayer(
 
   /** RADIO-001: the same native engine and EQ, fed by a bounded live PCM source. */
   fun pageRadioMetadata(
-    id: String, title: String, artist: String, artwork: String = "",
+    id: String, title: String, artist: String,
     song: MediaHub.Song? = null, track: JSONObject? = null, startMs: Long? = null, lengthMs: Long? = null,
   ) {
     if (!radioLive || loadedKey != "radio:$id" || title.isBlank()) return
@@ -131,7 +135,7 @@ class EnginePlayer(
     MediaHub.setRadioSong(song, track)
     val album = song?.album ?: track?.optString("album")?.takeIf { it.isNotBlank() && it != "null" }
     queue.set(listOf(Entry(old.song.copy(title = title.take(200), artist = NowPlayingLabel.radioArtist(artist, radioStation).take(200),
-      album = NowPlayingLabel.radioAlbum(radioStation, album).take(300), artwork = artwork.takeIf { it.isNotBlank() }, durationMs = lengthMs ?: -1L))), 0)
+      album = NowPlayingLabel.radioAlbum(radioStation, album).take(300), artwork = RadioArt.nowPlayingArt(BuildConfig.APPLICATION_ID, track?.optString("artwork"), song?.artwork), durationMs = lengthMs ?: -1L))), 0)
     invalidateState(); emitSoon()
   }
 
@@ -154,7 +158,9 @@ class EnginePlayer(
   /** A queue entry: the song, and the id it was chosen under (a playlist-scoped car id keeps its context). */
   data class Entry(val song: MediaHub.Song, val mediaId: String = song.id)
 
-  private val queue = PlayQueue<Entry>(keyOf = { it.mediaId }, isPlayable = { it.song.source != null && it.song.ready })
+  // AA-SHUFFLE-ONCE-001: addressed by mediaId (media3, page commands), counted as played by the song itself,
+  // so the same song arriving scoped from a car browse and plain from a page push is one play, not two.
+  private val queue = PlayQueue<Entry>(keyOf = { it.mediaId }, isPlayable = { it.song.source != null && it.song.ready }, heardBefore = { it.song.heard }, artistOf = { it.song.artist }, identityOf = { it.song.id })
   private val repeatSync = RepeatSync()
   private var repeatFromPage = false
   private var playWhenReady = false
@@ -239,7 +245,7 @@ class EnginePlayer(
    * the newest [rev] the page had seen; a load from before a change the service made is stale.
    */
   fun pageLoad(song: MediaHub.Song, mediaId: String?, positionMs: Long, play: Boolean, pageRev: Int) {
-    if (radioLive) { radioLive = false; forgetRadioItem(); com.nowplaying.discovery.RadioNative.stop(); com.nowplaying.discovery.RadioNative.shuffle = false }
+    leaveRadio()
     val id = mediaId ?: song.id
     val current = queue.current
     Log.i(TAG, "page load ${song.id.take(60)} link=${song.source != null} play=$play rev=$pageRev/$rev")
@@ -262,6 +268,12 @@ class EnginePlayer(
     playWhenReady = play
     holdWake(play)
     loadCurrent(positionMs.coerceAtLeast(0), chosen = true)
+  }
+
+  /** Ends a live broadcast (the song player takes over). Nothing when no radio plays. */
+  private fun leaveRadio() {
+    if (!radioLive) return
+    radioLive = false; forgetRadioItem(); com.nowplaying.discovery.RadioNative.stop(); com.nowplaying.discovery.RadioNative.shuffle = false
   }
 
   /** What the page will play after the current song; null for nothing (end of list, repeat-one). */
@@ -305,7 +317,7 @@ class EnginePlayer(
    * as an extra entry if it is not in the list (a search result) — and a chosen song that was
    * waiting for its file starts once the file is here.
    */
-  fun libraryChanged(list: List<MediaHub.Song>, shuffle: Boolean, repeat: Int) {
+  fun libraryChanged(list: List<MediaHub.Song>, shuffle: Boolean, repeat: Int, once: Boolean = false) {
     if (radioLive) return
     if (pageLive && list.isNotEmpty()) {
       val current = queue.current
@@ -317,6 +329,7 @@ class EnginePlayer(
         else -> queue.set(entries + current, entries.size)
       }
       queue.shuffle = shuffle
+      queue.playsOnce = once
       val chosen = repeatSync.fromPage(repeat)
       if (chosen != null) { if (chosen != repeatMode()) applyRepeat(chosen, fromPage = true) }
       else resendRepeatToPage() // it still shows a value the service has since changed: say so again
@@ -400,12 +413,19 @@ class EnginePlayer(
 
   /* -------------------------------------------------------------- Player state */
 
+  /** RADIO-ART-CAR-001: the bundled radio icon is app-owned, so it travels as bytes, never as a URI the car must open. */
+  private fun nowPlayingMetadata(song: MediaHub.Song): MediaMetadata {
+    val md = WebPlayer.metadataOf(song, playable = true, nowPlaying = true)
+    if (song.artwork != RadioArt.artString(BuildConfig.APPLICATION_ID)) return md
+    return md.buildUpon().setArtworkData(RadioArt.bytes(context), MediaMetadata.PICTURE_TYPE_FRONT_COVER).build()
+  }
+
   override fun getState(): State {
     val snap = engine.snapshot
     val playlist = queue.items.mapIndexed { i, e ->
       MediaItemData.Builder("${e.mediaId}#$i")
-        .setMediaItem(MediaItem.Builder().setMediaId(e.mediaId).setMediaMetadata(WebPlayer.metadataOf(e.song, playable = true, nowPlaying = true)).build())
-        .setMediaMetadata(WebPlayer.metadataOf(e.song, playable = true, nowPlaying = true))
+        .setMediaItem(MediaItem.Builder().setMediaId(e.mediaId).setMediaMetadata(nowPlayingMetadata(e.song)).build())
+        .setMediaMetadata(nowPlayingMetadata(e.song))
         .setDurationUs(durationUs(e.song, snap))
         .setIsSeekable(true)
         .build()
@@ -421,7 +441,8 @@ class EnginePlayer(
       .setPlayWhenReady(playWhenReady, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
       .setPlaylist(playlist)
       .setCurrentMediaItemIndex(queue.index.coerceAtLeast(0))
-      .setContentPositionMs(if (playing) PositionSupplier.getExtrapolating(positionMs, 1f) else PositionSupplier.getConstant(positionMs))
+      // CAR-RADIO-CLOCK-002: live radio with no known song start has no clock; a running count from zero would be invented.
+      .setContentPositionMs(if (playing && !(radioLive && radioStartMs == null)) PositionSupplier.getExtrapolating(positionMs, 1f) else PositionSupplier.getConstant(positionMs))
       .setShuffleModeEnabled(if (radioLive) com.nowplaying.discovery.RadioNative.shuffle else queue.shuffle)
       .setRepeatMode(
         when (queue.repeat) {
@@ -465,6 +486,11 @@ class EnginePlayer(
 
   private val pageLive: Boolean get() = page?.live == true
 
+  /** CAR-RESUME-001: the songs a car resume handed over, found here before the library has loaded. */
+  private val resumed = HashMap<String, MediaHub.Song>()
+  fun offerResumed(entries: List<Pair<String, MediaHub.Song>>) { resumed.clear(); for ((m, s) in entries) resumed[m] = s }
+  private fun find(id: String): MediaHub.Song? = lookup(id) ?: resumed[id]
+
   override fun handleSetMediaItems(mediaItems: MutableList<MediaItem>, startIndex: Int, startPositionMs: Long): ListenableFuture<*> {
     val start = if (startIndex == C.INDEX_UNSET) 0 else startIndex.coerceIn(0, (mediaItems.size - 1).coerceAtLeast(0))
     val chosen = mediaItems.getOrNull(start)?.mediaId
@@ -474,12 +500,17 @@ class EnginePlayer(
     if (chosen != null && chosen == queue.current?.mediaId && mediaItems[start].requestMetadata.extras?.getBoolean(KEEP_PLAYING) == true) return Futures.immediateVoidFuture()
     // Radio is native even with a live page: never send station ids through music lookup/playId.
     if (chosen != null && RadioCatalog.stationId(chosen) != null) return RadioCatalog.play(context, chosen)
+    // CAR-RADIO-TO-QUEUE-001 (owner, 2026-11-22): "on android auto playing radio and switching to now playing queue just
+    // takes the user back to the radio queue". A song chosen in the car while the radio plays ends the broadcast first;
+    // before, the native path loaded the song under a still-live radio session, so the car stayed on the station.
+    // A playlist pick (KEEP_PLAYING) changes nothing that plays, the radio included.
+    if (chosen != null && mediaItems[start].requestMetadata.extras?.getBoolean(KEEP_PLAYING) != true) leaveRadio()
     if (pageLive && chosen != null) {
       // The page knows the playlist context, the shuffle round and how to fetch a song it lacks.
       page?.command(JSONObject().put("type", "playId").put("id", chosen))
       return Futures.immediateVoidFuture()
     }
-    val entries = mediaItems.mapNotNull { item -> lookup(item.mediaId)?.let { Entry(it, item.mediaId) } }
+    val entries = mediaItems.mapNotNull { item -> find(item.mediaId)?.let { Entry(it, item.mediaId) } }
     queue.set(entries, entries.indexOfFirst { it.mediaId == chosen }.coerceAtLeast(0))
     nativeChange()
     loadCurrent(if (startPositionMs == C.TIME_UNSET) 0 else startPositionMs, chosen = true)
@@ -487,7 +518,7 @@ class EnginePlayer(
   }
 
   override fun handleAddMediaItems(index: Int, mediaItems: MutableList<MediaItem>): ListenableFuture<*> {
-    val add = mediaItems.mapNotNull { item -> lookup(item.mediaId)?.let { Entry(it, item.mediaId) } }
+    val add = mediaItems.mapNotNull { item -> find(item.mediaId)?.let { Entry(it, item.mediaId) } }
     if (add.isEmpty()) return Futures.immediateVoidFuture()
     val keep = queue.current?.mediaId
     val next = queue.items.toMutableList().apply { addAll(index.coerceIn(0, size), add) }
@@ -505,10 +536,21 @@ class EnginePlayer(
     val have = queue.items.map { it.mediaId }.toSet()
     val add = songs.filter { it.id !in have }.map { Entry(MediaHub.sourced(it)) }
     if (add.isEmpty()) return 0
-    val keep = queue.current?.mediaId
-    val next = queue.items + add
-    queue.set(next, next.indexOfFirst { it.mediaId == keep }.coerceAtLeast(0))
+    // WP7-APPEND-001: the queue spaces them away from the same artist instead of piling them on the end.
+    queue.insertSpaced(add)
     nativeChange()
+    // AA-NEXT-DRY-001: a Next press (or a song's end) that found nothing is answered by the first new song.
+    val owed = owedNextFrom
+    if (owed != null && queue.current?.song?.id == owed && !radioLive &&
+      (queue.advance(pressed = true) != null || queue.advanceFetchable(::canFetch) != null)) {
+      Log.i(TAG, "next (owed): ${owed.take(60)} -> ${queue.current?.song?.id?.take(60)} at ${queue.index}")
+      owedNextFrom = null
+      nativeChange()
+      loadCurrent(0, chosen = true)
+      holdWake(playWhenReady)
+      invalidateState(); emitSoon()
+      return add.size
+    }
     prepareNext()
     invalidateState(); emitSoon()
     return add.size
@@ -601,12 +643,14 @@ class EnginePlayer(
   private fun radioCommands(): Player.Commands {
     val station = com.nowplaying.discovery.RadioNative.session?.station
     val builder = COMMANDS.buildUpon().removeAll(Player.COMMAND_SEEK_FORWARD, Player.COMMAND_SET_REPEAT_MODE)
-    if (station == null || !RadioCatalog.canSkip(station)) {
+    if (station == null || !RadioCatalog.canSkip(station, com.nowplaying.discovery.RadioNative.shuffle)) {
       builder.removeAll(Player.COMMAND_SEEK_TO_NEXT, Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM, Player.COMMAND_SEEK_TO_PREVIOUS, Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
     }
     return builder.build()
   }
 
+  /** SHUFFLE-STAY-001: the index the controller guessed for its last seek (diagnostics only). */
+  @Volatile private var lastSeekIndex = -1
   override fun handleSeek(mediaItemIndex: Int, positionMs: Long, seekCommand: Int): ListenableFuture<*> {
     if (radioLive) {
       when (seekCommand) {
@@ -618,6 +662,7 @@ class EnginePlayer(
       }
       return Futures.immediateVoidFuture()
     }
+    lastSeekIndex = mediaItemIndex
     when (seekCommand) {
       Player.COMMAND_SEEK_TO_NEXT, Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM -> skip(forward = true)
       Player.COMMAND_SEEK_TO_PREVIOUS, Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> {
@@ -675,6 +720,8 @@ class EnginePlayer(
   /* -------------------------------------------------------------- transport */
 
   private fun changePlayWhenReady(play: Boolean) {
+    // AA-NEXT-DRY-001: a pause cancels a Next that was waiting for songs; nothing starts on its own later.
+    if (!play) owedNextFrom = null
     if (play && !requestFocus()) return
     // Car, lock-screen, focus and noisy-device controls share the phone radio pause state.
     if (radioLive) com.nowplaying.discovery.RadioNative.session?.paused = !play
@@ -694,16 +741,71 @@ class EnginePlayer(
     val from = queue.current?.song?.id
     val heard = heardNow()
     val cued = cue?.takeIf { forward && cueFor == from }
-    val moved = when {
+    var moved = when {
       cued != null -> moveTo(cued)
       forward -> queue.advance(pressed = true) != null
       else -> queue.previous() != null
     }
-    if (!moved) { if (!forward) pageSeek(0); return }
+    // AA-NEXT-DRY-001: with every downloaded song of the round played, Next streams an unheard one still downloading.
+    val fetching = !moved && forward && queue.advanceFetchable(::canFetch) != null
+    if (fetching) moved = true
+    if (!moved) {
+      // SHUFFLE-STAY-001: say why a press found nothing, so a stalled car Next can be told from a missing file.
+      if (forward) Log.i(TAG, "next: nothing to follow ${from?.take(60)} at ${queue.index} (shuffle=${queue.shuffle}, once=${queue.playsOnce}, repeat=${queue.repeat}) " +
+        queue.items.joinToString { "${it.song.id.take(40)}[r=${it.song.ready},h=${it.song.heard},s=${it.song.source != null}]" })
+      // AA-NEXT-DRY-001: nothing unheard is left at all. Find more for the listening mood; the first found song is
+      // this press's answer (appendFound moves on to it), so Next is never silently dead.
+      if (forward && onQueueDry != null) { owedNextFrom = from; onQueueDry?.invoke() }
+      if (!forward) pageSeek(0)
+      return
+    }
+    // SHUFFLE-STAY-001: each press, from and to, so a controller's guessed index can be told from the engine's move.
+    Log.i(TAG, "${if (forward) "next" else "prev"}: ${from?.take(60)} -> ${queue.current?.song?.id?.take(60)} at ${queue.index} (shuffle=${queue.shuffle}, mediaIndex=$lastSeekIndex)")
     nativeChange()
     log(if (forward) "next" else "prev", heard)
-    loadCurrent(0, chosen = false)
+    loadCurrent(0, chosen = fetching)
   }
+
+  /** AA-NEXT-DRY-001: a song can still be had (streamed while its file downloads), not only one already on the phone. */
+  private fun canFetch(e: Entry): Boolean = e.song.source != null
+
+  /**
+   * AA-NEXT-DRY-001: the song a Next press (or a song's end) found nothing after. When songs are appended while it is
+   * still the song current, the queue moves on to them. Cleared by any other change of song.
+   */
+  private var owedNextFrom: String? = null
+  /** AA-NEXT-DRY-001: the queue has nothing unheard left; the service starts a mood top-up. Main thread. */
+  var onQueueDry: (() -> Unit)? = null
+
+  /**
+   * CAR-X-001 (owner, 2026-11-24: "ensure the X button works on android auto"): the car's X took song [id] out while it
+   * plays. With the phone page in charge the page drops it and plays the next one; otherwise the queue does
+   * ([PlayQueue.leave], skipping songs [avoid] turns down). Media3's own Next was not enough: it does nothing for the
+   * last song of the list, under shuffle too. Returns false when nothing can follow: the song is paused instead.
+   */
+  fun leaveSong(id: String, avoid: (MediaHub.Song) -> Boolean): Boolean {
+    val cur = queue.current ?: return false
+    if (cur.song.id != id && cur.mediaId != id) return false
+    if (pageLive) { page?.command(JSONObject().put("type", "leave").put("id", cur.song.id)); Log.i(TAG, "leave ${id.take(60)}: page"); return true }
+    val heard = heardNow()
+    val size = queue.items.size
+    if (queue.leave(cur.mediaId, avoid = { avoid(it.song) }, canFetch = { it.song.source != null }) == null) {
+      Log.i(TAG, "leave ${id.take(60)}: nothing to follow in $size (heard ${queue.items.count { it.song.heard }}, ready ${queue.items.count { it.song.ready }}, playsOnce=${queue.playsOnce}, shuffle=${queue.shuffle}) " +
+        queue.items.joinToString { "${it.song.id.take(24)}[avoid=${avoid(it.song)},ready=${it.song.ready},src=${it.song.source != null},pageHeard=${it.song.heard}]" })
+      changePlayWhenReady(false)
+      return false
+    }
+    Log.i(TAG, "leave ${id.take(60)}: now ${queue.current?.song?.id?.take(60)} (ready=${queue.current?.song?.ready})")
+    cue = null
+    cueFor = null
+    nativeChange()
+    log("next", heard)
+    loadCurrent(0, chosen = queue.current?.song?.ready != true) // a song still to fetch waits for its file
+    return true
+  }
+
+  /** Tests only: start the next test from an empty queue (CAR-X-001 tests take songs out of it). */
+  internal fun forgetQueueForTests() { queue.set(emptyList(), -1); invalidateState() }
 
   /** Make [song] current: in the queue if it is there, appended otherwise (a cue from outside the list). */
   private fun moveTo(song: MediaHub.Song): Boolean {
@@ -752,6 +854,7 @@ class EnginePlayer(
    * picked this song, so if its file is not here yet it waits; otherwise it is skipped.
    */
   private fun loadCurrent(startMs: Long, chosen: Boolean) {
+    if (queue.current?.song?.id != owedNextFrom) owedNextFrom = null
     val entry = queue.current ?: run { invalidateState(); emit(null); return }
     val song = entry.song
     val gen = ++loadGeneration
@@ -785,7 +888,10 @@ class EnginePlayer(
             return@post
           }
           // Reached by advancing and not on the phone: skip it, as the page does.
-          if (queue.advance(pressed = true) != null && queue.current?.song?.id != song.id) { nativeChange(); loadCurrent(0, chosen = false) }
+          if (queue.advance(pressed = true) != null && queue.current?.song?.id != song.id) {
+            Log.i(TAG, "not on the phone, skipped: ${song.id.take(60)} -> ${queue.current?.song?.id?.take(60)} at ${queue.index}")
+            nativeChange(); loadCurrent(0, chosen = false)
+          }
           else {
             error = PlaybackException("“${song.title}” is not on this phone yet", null, PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND)
             invalidateState()
@@ -878,21 +984,26 @@ class EnginePlayer(
   private fun songEnded(key: String, heard: AudioEngine.Heard) {
     if (queue.current?.song?.id != key) return
     val next = upcoming()
-    val moved = when {
+    var moved = when {
       next != null -> moveTo(next)
       pageLive -> false // the page decides what follows (it may still be fetching it)
       else -> queue.advance(pressed = false) != null
     }
+    // AA-NEXT-DRY-001: the round's downloaded songs are used up; an unheard one still downloading plays from its source.
+    val fetching = !moved && !pageLive && !queue.repeatsSong && queue.advanceFetchable(::canFetch) != null
+    if (fetching) moved = true
     if (!moved) {
       ended = true
       holdWake(false)
       invalidateState()
       log("end", heard, advanced = false)
+      // AA-NEXT-DRY-001: a shuffled queue with nothing unheard left finds more for the mood and carries on with them.
+      if (!pageLive && queue.shuffle && !queue.repeatsSong && onQueueDry != null) { owedNextFrom = key; onQueueDry?.invoke() }
       return
     }
     nativeChange()
     log("end", heard)
-    loadCurrent(0, chosen = false)
+    loadCurrent(0, chosen = fetching)
   }
 
   private fun blendPromoted(key: String, outgoing: AudioEngine.Heard) {
@@ -982,6 +1093,8 @@ class EnginePlayer(
   private fun log(cause: String, heard: AudioEngine.Heard, advanced: Boolean = true) {
     val entry = JSONObject()
       .put("seq", ++seq)
+      // QUEUE-HEARD-001: when, so the phone page and the service page give this listen the same id.
+      .put("at", System.currentTimeMillis())
       .put("cause", cause)
       .put("advanced", advanced)
       .put(
@@ -1019,6 +1132,8 @@ class EnginePlayer(
       .put("soundingMs", snap.positionFrames * 1000 / SAMPLE_RATE)
       .put("soundingDurMs", if (snap.durationFrames > 0) snap.durationFrames * 1000 / SAMPLE_RATE else -1)
       .put("at", SystemClock.elapsedRealtime())
+      // QUEUE-HEARD-001: with no phone page open the service page records listens and tops the queue up.
+      .put("pageLive", pageLive)
       .apply { if (event != null) put("event", event) }
   }
 

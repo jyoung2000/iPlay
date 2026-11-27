@@ -39,15 +39,17 @@ class RadioCatalogTest {
   }
   @Test fun letterBrowseScansBeyondNonmatchingRowsWithAnHonestRawCursor() {
     val urls = mutableListOf<String>()
-    val d = RadioDirectory { u -> urls += u; if (u.contains("offset=0")) JSONArray((0..119).map { row("r$it", "Radio K") }).toString() else JSONArray().put(row("k", "KEXP")).toString() }
+    val batch = RadioCatalog.INITIAL_BATCH
+    val d = RadioDirectory { u -> urls += u; if (u.contains("offset=0")) JSONArray((0 until batch).map { row("r$it", "Radio K") }).toString() else JSONArray().put(row("k", "KEXP")).toString() }
     val page = d.letterPage("K", 0)
     assertEquals(listOf("KEXP"), page.stations.map { it.name }); assertNull(page.nextOffset)
-    assertEquals(2, urls.size); assertTrue(urls.last().contains("offset=120")); assertTrue(urls.first().contains("name=K"))
+    assertEquals(2, urls.size); assertTrue(urls.last().contains("offset=$batch")); assertTrue(urls.first().contains("name=K"))
   }
   @Test fun boundedEmptyLetterBatchDoesNotClaimThatNoStationsExist() {
-    var calls = 0; val d = RadioDirectory { calls++; JSONArray((0..119).map { row("r$it", "Radio K") }).toString() }
+    var calls = 0; val batch = RadioCatalog.INITIAL_BATCH
+    val d = RadioDirectory { calls++; JSONArray((0 until batch).map { row("r$it", "Radio K") }).toString() }
     val page = d.letterPage("K", 0)
-    assertTrue(page.stations.isEmpty()); assertEquals(240, page.nextOffset); assertEquals(2, calls)
+    assertTrue(page.stations.isEmpty()); assertEquals(RadioCatalog.INITIAL_BUDGET, page.nextOffset); assertEquals(RadioCatalog.INITIAL_BUDGET / batch, calls)
   }
 
   private fun row(id: String, name: String) = JSONObject().put("id", id).put("name", name).put("url", "https://streams.example/$id")
@@ -160,6 +162,27 @@ class RadioCatalogTest {
       val counts = picks.groupingBy { it }.eachCount()
       assertTrue("uniform draw, not a biased one: $counts", counts.values.all { it in 40..160 })
     } finally { RadioCatalog.selectContext("missing-radio-test-context") }
+  }
+
+  @Test fun shuffleDoesNotRepeatAStationUntilEveryOtherOneWasPlayed() {
+    // RADIO-SHUFFLE-NO-REPEAT-001 (owner, 2026-11-25): "shuffle on radio shouldnt repeat stations".
+    RadioCatalog.rememberStations(JSONArray().put(row("nr-a", "Alpha")).put(row("nr-b", "Beta")).put(row("nr-c", "Chi")).put(row("nr-d", "Delta")).put(row("nr-e", "Echo")))
+    RadioCatalog.selectContext("nr-a")
+    try {
+      repeat(20) { round ->
+        RadioCatalog.resetShuffle("nr-a")
+        val random = kotlin.random.Random(round)
+        var on = "nr-a"
+        val played = mutableListOf<String>()
+        repeat(4) {
+          val next = RadioCatalog.randomOther(on, random)!!.id
+          RadioCatalog.markPlayed(next); played += next; on = next
+        }
+        assertEquals("four skips reach the four other stations once each: $played", setOf("nr-b", "nr-c", "nr-d", "nr-e"), played.toSet())
+        assertNull("with every station played the list itself offers no repeat", RadioCatalog.randomOther(on, random))
+      }
+      assertTrue("shuffle keeps Next available", RadioCatalog.canSkip("nr-a", shuffle = true))
+    } finally { RadioCatalog.resetShuffle(null); RadioCatalog.selectContext("missing-radio-test-context") }
   }
 
   @Test fun shuffledSkipHasNoTargetWithoutAnotherStationInTheList() {

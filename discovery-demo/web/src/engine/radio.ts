@@ -3,7 +3,9 @@ import { stationInPlace, type RadioPlace } from './radio-places';
 import { iheartFits, iheartIdsUrl, iheartNearUrl, iheartSearchUrl, mergeStations, parseIheartSearch, parseIheartStations, type IheartStation } from './radio-iheart';
 // RADIO-001. A station is a broadcast, not a song. Only broadcaster metadata or audio recognition
 // may identify its current item. Directory genre labels never become song or preference evidence.
-export interface RadioStation { id: string; name: string; url: string; homepage: string; image: string; country: string; countryCode: string; region: string; language: string; tags: string[]; codec: string; bitrate: number; latitude: number | null; longitude: number | null }
+export interface RadioStation { id: string; name: string; url: string; homepage: string; image: string; country: string; countryCode: string; region: string; language: string; tags: string[]; codec: string; bitrate: number; latitude: number | null; longitude: number | null;
+  /** RADIO-IHEART-META-001: the iHeart station this directory row was merged with (its stream and song feed). */
+  iheartId?: string }
 export interface Broadcast { state: 'current' | 'stale' | 'unavailable' | 'failed'; kind: 'song' | 'programme'; title: string; artist: string | null; source: string; checkedAt: number; detail?: string; startedAt?: number | null; duration?: number | null; validUntil?: number | null; artwork?: string | null }
 export const DIRECTORY_SERVERS = ['https://de1.api.radio-browser.info', 'https://nl1.api.radio-browser.info', 'https://at1.api.radio-browser.info'];
 export function publicUrl(raw: string): boolean {
@@ -11,9 +13,33 @@ export function publicUrl(raw: string): boolean {
 }
 const txt = (v: unknown) => String(v ?? '').trim().slice(0, 500);
 export function normalizeStation(o: Record<string, unknown>): RadioStation | null {
-  const url = txt(o.url_resolved || o.url), id = txt(o.stationuuid), name = txt(o.name);
+  // RADIO-ROBUST-001: a playlist link (.m3u/.pls/.m3u8 or /playlist/) is read fresh by the player each time; the
+  // directory's resolved address behind it can be a one-time session that has expired (WGN 720).
+  const playlist = /\.(m3u8?|pls)(\?|$)|\/playlist\//i.test(txt(o.url));
+  const url = txt(playlist ? o.url : o.url_resolved || o.url), id = txt(o.stationuuid), name = txt(o.name);
   if (!id || !name || !publicUrl(url)) return null;
   return { id, name, url, homepage: publicUrl(txt(o.homepage)) ? txt(o.homepage) : '', image: publicUrl(txt(o.favicon)) ? txt(o.favicon) : '', country: txt(o.country), countryCode: txt(o.countrycode), region: txt(o.state), language: txt(o.language), tags: txt(o.tags).split(',').map(x => x.trim()).filter(Boolean).slice(0, 10), codec: txt(o.codec), bitrate: Number(o.bitrate) || 0, latitude: o.geo_lat == null ? null : Number(o.geo_lat), longitude: o.geo_long == null ? null : Number(o.geo_long) };
+}
+/** RADIO-ROBUST-001: how far behind the newest audio the listener is, as the largest gap seen in the last 3 s. Stations
+ *  that send audio in bursts (Power 92) make the raw gap swing by a second or two between bursts. */
+export class GapWindow {
+  private samples: { at: number; gap: number }[] = [];
+  add(at: number, gap: number): number {
+    this.samples = this.samples.filter((s) => at - s.at < 3000 && s.at <= at);
+    this.samples.push({ at, gap });
+    return Math.max(...this.samples.map((s) => s.gap));
+  }
+  reset() { this.samples = []; }
+}
+/** RADIO-ROBUST-001: why a station cannot play, in plain words (the shells report low-level network errors). */
+export function radioErrorText(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const http = /HTTP (\d{3})/.exec(raw);
+  if (http) return `This station's stream is offline right now (HTTP ${http[1]}). Try another station.`;
+  if (/timed out|timeout|failed to connect|read interrupted|unable to resolve host|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|unreachable|connection reset/i.test(raw)) return 'The station did not answer. Try again, or pick another station.';
+  if (/Station disconnected|stream ended/i.test(raw)) return 'The station stopped sending audio. Reconnect to try again.';
+  if (/decoder stopped|decoder missing|could not decode/i.test(raw)) return 'This station\'s audio could not be played. Try another station.';
+  return raw;
 }
 export const stationLocation = (s: RadioStation) => [...new Set([s.region, s.country].filter(Boolean))].join(', ') || 'Location not supplied';
 export function parseBroadcast(raw: string | null, source: string, checkedAt = Date.now()): Broadcast {
@@ -41,8 +67,14 @@ export type RadioRequest = (url: string) => Promise<string>;
 export interface RadioSearch { query?: string; country?: string; language?: string; tag?: string; letter?: string; offset?: number;
   /** RADIO-PLACES-001: the listener's chosen places; when any are given they replace `country`. */
   places?: readonly RadioPlace[] }
-export const STATION_LETTERS = ['', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'] as const;
+// RADIO-AZ-ALL-001 (owner, 2026-11-24): every station in the directory has an initial here. '#' holds the names the
+// Latin alphabet cannot index — other scripts, symbols, punctuation — so no station is left out of the A-Z browse.
+export const STATION_LETTERS = ['', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ', '#'] as const;
 export const STATION_NUMBERS = ['', ...'0123456789'] as const;
+/** RADIO-AZ-ALL-001: rows asked for per directory request, and rows scanned per page, when browsing by initial.
+ * Radio Browser only filters names by substring, so an initial is found locally; the scan must be allowed to run
+ * past batches that hold no match (names in other scripts sit at the far end of a 53,000-station directory). */
+export const STATION_SCAN_BATCH = 1000, STATION_SCAN_BUDGET = 4000;
 const foldedStationName = (name: string) => name.normalize('NFKD').replace(/\p{M}/gu, '').toUpperCase();
 const stationCalls = (name: string): string[] => [...foldedStationName(name).matchAll(/(?:^|[^A-Z])([WK][A-Z]{2,3})(?=$|[^A-Z])/g)].map(m => m[1]!);
 /** Frequency/number aliases come from the real name, never a fabricated dial mapping. */
@@ -73,6 +105,12 @@ export function stationInitial(name: string): string {
   const brand = foldedStationName(name.trimStart()).replace(/^[^\p{L}]+/u, '').replace(/^(?:FM|AM|HD)\b[\s:-]*/, '');
   const first = brand.charAt(0); return /^[A-Z]$/.test(first) ? first : '#';
 }
+// RADIO-AZ-ALL-001 (owner, 2026-11-24): one order for the whole world — the name read as a reader reads it (case and
+// accents ignored, numbers in numeric order), with the station id breaking ties so paging never reshuffles a list.
+export function compareStations(a: RadioStation, b: RadioStation): number {
+  const byName = a.name.trim().localeCompare(b.name.trim(), 'en', { sensitivity: 'base', numeric: true });
+  return byName || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
 export function stationMatchesInitial(name: string, initial: string): boolean {
   return !initial || (/^[0-9]$/.test(initial) ? stationNumbers(name).some(n => n.startsWith(initial)) : stationInitial(name) === initial);
 }
@@ -90,6 +128,20 @@ export class RadioDirectory {
   constructor(private request: RadioRequest) {}
   async read(path: string): Promise<unknown> { let last: unknown; for (const host of DIRECTORY_SERVERS) { try { return JSON.parse(await this.request(host + path)); } catch (e) { last = e; } } throw last; }
   async search(opts: RadioSearch = {}): Promise<RadioStation[]> { return (await this.page(opts)).stations; }
+  /** RADIO-SHUFFLE-NO-REPEAT-001: how many stations the directory holds (cached), for a random A-Z page. */
+  private worldTotal = 0;
+  async worldCount(): Promise<number> {
+    if (this.worldTotal > 0) return this.worldTotal;
+    try { const n = Number((await this.read('/json/stats') as { stations?: unknown } | null)?.stations); if (Number.isFinite(n) && n > 0) return (this.worldTotal = Math.floor(n)); } catch { /* directory down: an estimate */ }
+    return 40000;
+  }
+  /** A random page of every station in the world by name, with no filter, for shuffle to draw new stations from. */
+  async worldPage(rnd: () => number = Math.random): Promise<RadioStation[]> {
+    const total = Math.min(await this.worldCount(), 1_000_000);
+    const q = new URLSearchParams({ order: 'name', reverse: 'false', limit: '100', offset: String(Math.floor(rnd() * Math.max(1, total - 100))) });
+    const data = await this.read(`/json/stations/search?${q}`);
+    return (Array.isArray(data) ? data : []).map((row) => normalizeStation(row as Record<string, unknown>)).filter((s): s is RadioStation => !!s);
+  }
   /** RADIO-ALL-STATIONS-001: iHeart answers, never fatal; the list stands on Radio Browser when iHeart is down. */
   private async iheart(url: string): Promise<string> { try { return await this.request(url); } catch { return ''; } }
   private async iheartNear(p: RadioPlace): Promise<IheartStation[]> {
@@ -117,7 +169,11 @@ export class RadioDirectory {
     if (letter && !/^[A-Z0-9#]$/.test(letter)) throw new Error('Invalid station initial');
     let offset = Math.max(0, Math.floor(opts.offset || 0));
     const narrowed = !!letter || !!stationQueryParts(opts.query || '');
-    const limit = narrowed ? 120 : 24, visibleLimit = (stationQueryParts(opts.query || '')?.frequency?.length || 0) >= 2 ? 48 : 24, out: RadioStation[] = [], seen = new Set<string>();
+    // RADIO-AZ-ALL-001: browsing by initial scans a budget of raw rows per page, so a batch holding no match for this
+    // initial never ends the list; only the directory running out does.
+    const browsing = !!letter && !opts.query?.trim();
+    const limit = browsing ? STATION_SCAN_BATCH : narrowed ? 120 : 24, budget = browsing ? STATION_SCAN_BUDGET : narrowed ? 240 : 24;
+    const visibleLimit = (stationQueryParts(opts.query || '')?.frequency?.length || 0) >= 2 ? 48 : 24, out: RadioStation[] = [], seen = new Set<string>();
     if (narrowed && offset === 0) {
       const cached = [...this.namedMatches, ...[...this.aliases.values()].reverse()];
       for (const station of cached) {
@@ -129,14 +185,18 @@ export class RadioDirectory {
         seen.add(station.id); out.push(station);
       }
     }
-    for (let batch = 0; batch < (narrowed ? 2 : 1); batch++) {
+    for (let scanned = 0; scanned < budget;) {
       const q = new URLSearchParams({ hidebroken: 'true', order: narrowed ? 'name' : 'clickcount', reverse: narrowed ? 'false' : 'true', limit: String(limit), offset: String(offset) });
       const name = opts.query?.trim() ? stationQuerySource(opts.query) : letter === '#' ? '' : letter;
       if (name) q.set('name', name);
       if (opts.country) q.set('countrycode', opts.country);
       if (opts.language) q.set('language', opts.language);
       if (opts.tag) { q.set('tag', opts.tag); q.set('tagExact', 'true'); }
-      const data = await this.read(`/json/stations/search?${q}`);
+      // RADIO-AZ-ALL-001: a batch that fails keeps the stations already found and hands back its own offset, so
+      // "More stations" resumes exactly where the directory stopped answering instead of skipping those stations.
+      let data: unknown;
+      try { data = await this.read(`/json/stations/search?${q}`); }
+      catch (e) { if (!scanned) throw e; return { stations: out, nextOffset: offset }; }
       if (!Array.isArray(data)) throw new Error('The station directory returned an invalid page');
       for (let index = 0; index < data.length; index++) {
         const station = normalizeStation(data[index]);
@@ -147,7 +207,7 @@ export class RadioDirectory {
         if (stationQueryParts(opts.query || '')?.call) this.namedMatches = out.slice(0, 12);
         if (out.length === visibleLimit) return { stations: out, nextOffset: index + 1 < data.length || data.length === limit ? offset + index + 1 : null };
       }
-      offset += data.length;
+      offset += data.length; scanned += data.length;
       if (data.length < limit) return { stations: out, nextOffset: null };
     }
     return { stations: out, nextOffset: offset };
@@ -281,6 +341,37 @@ export function broadcastTimeline(b: Broadcast | null, track: { duration?: numbe
   return { over, elapsed, duration, durationSource: publishedDuration ? 'broadcaster' : catalogueDuration ? 'catalogue' : null, clockSource: elapsed === null ? null : measured ? 'audio' as const : 'broadcaster' as const, behind, max, value, rewindable: Math.max(0, (snap?.position ?? 0) - (snap?.oldest ?? 0)) };
 }
 /**
+ * RADIO-ICY-CLOCK-001: where a song begins in the audio heard, from the native ring's in-band title changes (ring
+ * seconds). The feed can run ahead of the audio (Power 92: 37.5 s), so the change must come after the feed named the
+ * song (`markerAt`, ring seconds, 10 s of slack) and within five minutes of it. Null when none fits.
+ */
+export function icySongStart(marks: readonly { at: number; title: string }[] | undefined, b: Broadcast | null, markerAt: number): number | null {
+  if (!marks?.length || !b || b.kind !== 'song' || !b.title) return null;
+  const norm = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  const title = norm(b.title), artist = b.artist ? norm(b.artist).split(' ')[0] ?? '' : '';
+  if (!title) return null;
+  const hit = marks.filter((m) => Number.isFinite(m.at) && m.at >= markerAt - 10 && m.at <= markerAt + 300)
+    .find((m) => { const t = norm(m.title); return t.includes(title) && (!artist || t.includes(artist)); });
+  return hit ? Math.round(hit.at * 100) / 100 : null;
+}
+/**
+ * CAR-RADIO-CLOCK-002 (owner, 2026-11-20): the clock Android Auto is given, by the phone's own rules
+ * ([broadcastTimeline]). `pinnedStart` is the published start already pinned to the ring clock for this item.
+ * - A start measured from the audio wins and is never "over".
+ * - RADIO-SONG-OVER-001: a published start more than a minute past the song's whole catalogue length (no
+ *   broadcaster length) means the feed is still naming a song that has ended: `over`, and no clock.
+ * - No known start: no clock at all. A length alone would make the car draw a bar counting from zero.
+ */
+export function carRadioClock(b: Broadcast | null, track: { duration?: number | null } | null, identified: boolean, snap: { received: number; position: number } | null, now = Date.now(), measuredStart?: number | null, pinnedStart?: number | null): { start: number | null; duration: number | null; over: boolean } {
+  const measured = !!snap && typeof measuredStart === 'number' && Number.isFinite(measuredStart);
+  const own = radioItemClock(b, track, identified, snap, now, measuredStart);
+  const start = measured ? own.start : typeof pinnedStart === 'number' && Number.isFinite(pinnedStart) ? pinnedStart : own.start;
+  if (start === null || !snap) return { start: null, duration: null, over: false };
+  const published = typeof b?.duration === 'number' && Number.isFinite(b.duration) && b.duration > 0;
+  const over = !measured && !published && own.duration !== null && snap.position - start > own.duration + 60;
+  return over ? { start: null, duration: null, over: true } : { start, duration: own.duration, over: false };
+}
+/**
  * CAR-RADIO-CONTROLS-001: the on-air item's clock for Android Auto, on the ring's sample clock: where
  * the item began (seconds; the car shows position minus this) and its length, with the same sources
  * and precedence as [broadcastTimeline]: a start measured from the audio, else a published start;
@@ -319,6 +410,13 @@ export function radioClock(seconds: number | null): string {
  * RADIO-UI-005: shuffle across stations picks any OTHER station, uniformly; -1 when there is no
  * other station to go to. Pure so both the phone player and tests share one rule.
  */
+/** RADIO-SHUFFLE-NO-REPEAT-001 (owner, 2026-11-25): a random station that is neither on air nor already played this
+ * shuffle round; null when none is left, so the caller loads more of the directory. */
+export function pickUnseenStation(pool: readonly RadioStation[], seen: ReadonlySet<string>, current: string | undefined, rnd: () => number): RadioStation | null {
+  const ids = new Set<string>();
+  const open = pool.filter((s) => { if (s.id === current || seen.has(s.id) || ids.has(s.id)) return false; ids.add(s.id); return true; });
+  return open.length ? open[Math.min(open.length - 1, Math.max(0, Math.floor(rnd() * open.length)))] ?? null : null;
+}
 export function pickShuffleIndex(length: number, current: number, rnd: () => number): number {
   if (length < 2) return -1;
   let n = Math.floor(rnd() * (length - 1)); if (n < 0) n = 0; if (n >= length - 1) n = length - 2;

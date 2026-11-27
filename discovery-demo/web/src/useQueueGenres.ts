@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import { api, type Characteristics, type RecItem, type RecResult, type Track } from './api';
+import { wantsAlbum } from './engine/album-name';
 
 /**
  * GENRE-LOAD-001 — owner: "ensure genre & sub genre tags load on both apps".
@@ -13,6 +14,11 @@ export interface GenreAnswer {
   key: string;
   tags: Track['tags'];
   characteristics: Characteristics;
+  /** ALBUM-NAME-001: the album the song is on, when its row only had its single. */
+  album?: string | null;
+  album_id?: string | null;
+  album_looked?: boolean | number;
+  album_confirmed?: boolean;
 }
 
 /**
@@ -20,6 +26,8 @@ export interface GenreAnswer {
  * only by a guess of ours ("pop, lent by the starting song") still shows it, and is still asked about.
  */
 export function rowPlaced(item: RecItem): boolean {
+  // ALBUM-NAME-001: a row still showing only its single's name waits for its album to be looked up.
+  if (wantsAlbum(item.track as never)) return false;
   const c = item.characteristics;
   if (!c || !((c.genres ?? []).length || c.family)) return false;
   // GENRE-ALL-001: the engine says a lookup can still name this row's subgenre.
@@ -38,10 +46,14 @@ export function mergeGenres(result: RecResult, rows: readonly GenreAnswer[]): Re
     changed = true;
     // The engine's answer is the row's whole state: a "can still be improved" mark it no longer sends is gone.
     const { genre_pending: _was, ...kept } = (item.characteristics ?? {}) as Characteristics;
-    return { ...item, track: { ...item.track, tags: got.tags }, characteristics: { ...kept, ...got.characteristics } };
+    const album = got.album_looked ? { album_looked: got.album_looked, ...(got.album ? { album: got.album, album_id: got.album_id ?? undefined } : {}), ...(got.album_confirmed ? { album_confirmed: true } : {}) } : {};
+    return { ...item, track: { ...item.track, tags: got.tags, ...album }, characteristics: { ...kept, ...got.characteristics } };
   });
   return changed ? { ...result, items } : result;
 }
+
+const RESUME_MIN_MS = 30_000;
+const RESUME_MAX_MS = 30 * 60_000;
 
 export function useQueueGenres(result: RecResult | null, running: boolean, setResult: Dispatch<SetStateAction<RecResult | null>>): void {
   // The rows still to place, as one string: asking again is tied to that set changing.
@@ -50,6 +62,9 @@ export function useQueueGenres(result: RecResult | null, running: boolean, setRe
   const busy = useRef(false);
   /** The set the engine last said it could do no more for; not asked about again until it changes. */
   const settled = useRef('');
+  /** ALLOWANCE-ARCH-001: the timer that asks again once paused look-ups can resume. */
+  const resume = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(resume.current), []);
 
   useEffect(() => {
     if (!wanted || running || busy.current || settled.current === wanted) return;
@@ -65,6 +80,16 @@ export function useQueueGenres(result: RecResult | null, running: boolean, setRe
         if (r?.left > 0 && !r.spent) return setAgain((n) => n + 1);
         // Nothing more can be asked: the rows still unplaced wait for the queue to change.
         settled.current = wanted.split('\n').filter((k) => !rows.some((x) => x.key === k)).join('\n');
+        // ALLOWANCE-ARCH-001: paused to save mobile data. The engine says when the allowance has refilled enough;
+        // ask again then, by itself (never sooner than half a minute, never later than half an hour).
+        if (r?.spent && typeof r.resumes_at === 'number') {
+          const wait = Math.min(RESUME_MAX_MS, Math.max(RESUME_MIN_MS, r.resumes_at * 1000 - Date.now()));
+          clearTimeout(resume.current);
+          resume.current = setTimeout(() => {
+            settled.current = '';
+            setAgain((n) => n + 1);
+          }, wait);
+        }
       },
       () => {
         busy.current = false;

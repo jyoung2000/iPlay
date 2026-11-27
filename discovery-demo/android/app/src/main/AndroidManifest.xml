@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
   <uses-permission android:name="android.permission.INTERNET" />
+  <!-- ALLOWANCE-ARCH-001: to tell Wi-Fi from mobile data. The mobile data allowance applies on mobile data only. No prompt. -->
+  <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
   <!-- Song identification from the search bar's Mic: asked for when Mic is tapped, never at start-up. -->
   <uses-permission android:name="android.permission.RECORD_AUDIO" />
   <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
@@ -10,6 +12,14 @@
   <uses-permission android:name="android.permission.WAKE_LOCK" />
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
   <uses-feature android:name="android.hardware.microphone" android:required="false" />
+  <!-- CAR-QUICK-SEARCH-001: the car's Search tab tiles listen with the phone's speech recognizer. -->
+  <queries>
+    <intent>
+      <action android:name="android.speech.RecognitionService" />
+    </intent>
+    <!-- CAR-KEEP-001: Settings says whether Android Auto is installed and opens its settings. -->
+    <package android:name="com.google.android.projection.gearhead" />
+  </queries>
 
   <application
     android:allowBackup="false"

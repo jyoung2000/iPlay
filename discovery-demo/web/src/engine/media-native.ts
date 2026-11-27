@@ -26,6 +26,8 @@ export interface NativeSong {
   source?: string | null;
   /** CAR-SEARCH-TYPES-001: what kind of result a car search song is, for the car's icons. */
   kinds?: CarKind[];
+  /** SHUFFLE-ONCE-001: a queue song heard before; the queue's shuffle does not play it again. */
+  heard?: boolean;
 }
 
 /** CAR-SEARCH-TYPES-001: the kinds the car's search icons narrow to. */
@@ -80,6 +82,8 @@ export interface NativeState {
   /** CAR-ACTIONS-001: the song now playing is starred (liked) / disliked, for the car's buttons. */
   liked: boolean;
   disliked: boolean;
+  /** SHUFFLE-ONCE-001: the queue is the now playing queue under shuffle: each song plays once, no new round. */
+  once?: boolean;
 }
 
 /** CAR-ACTIONS-001: the judgements the car's Star and Dislike buttons can send. */
@@ -95,6 +99,8 @@ export interface MediaHandlers {
   seek?: (positionMs: number) => void;
   /** Play a specific library song by its track key (an Android Auto tap, or a resolved voice query). */
   playId?: (id: string) => void;
+  /** CAR-X-001: the car's X took this song (the one the car plays) out; drop it and play the next one. */
+  leave?: (id: string) => void;
   /** Play the queue item at this index. */
   playIndex?: (index: number) => void;
   /** A raw search query (voice), when the native side could not resolve it to a song itself. */
@@ -112,12 +118,20 @@ export interface MediaHandlers {
   /** CAR-ACTIONS-001: Star or Dislike pressed in the car (or queued while the app was closed). */
   /** CAR-RADIO-CONTROLS-001: `track` is the radio song's own Track when the car starred a song on air. */
   feedback?: (id: string, kind: CarFeedbackKind, track?: Track) => void;
+  /**
+   * ARTIST-FAV-CAR-001: the car's Star the artist button: the song's artists join the starred artists.
+   * CAR-ANSWERABLE-001: the names actually saved go back, so the car can say what happened instead of
+   * assuming it worked.
+   */
+  starArtists?: (id: string, credit: string, track?: Track) => void | Promise<void> | Promise<string[]>;
   /** CAR-CONTROLS-001: the car's playlist picker (after a row's star) chose playlist `list` for song `id`. */
   playlistAdd?: (id: string, list: string, track?: Track) => void;
   /** CAR-SIMILAR-001: the car's Find similar button: add songs that sound like song `id` to the list. */
   findSimilar?: (id: string) => Promise<{ added: number; minimum: number; reason: string; songs: NativeSong[] }>;
   /** CAR-MOOD-001: the mood order of the car's movable songs (media ids), with the phone app closed. */
   moodOrder?: (req: { current: string | null; upcoming: string[]; signal: { id: string; kind: string } | null }) => Promise<{ order: string[]; moved: string[]; changed: boolean; leading: string[] }>;
+  /** MOOD-DEFAULT-CAR-001: the car's "Discover for my mood": one Discover run from the listening mood; new songs go to the queue's end. */
+  discoverMood?: () => Promise<{ added: number; leading: string[]; reason: string; songs: NativeSong[] }>;
 }
 
 type NativeMedia = { media?: (json: string) => void };
@@ -157,6 +171,13 @@ export function pickCarContext(ctx: unknown, id: string): { track: Track; tracks
   return { track, tracks };
 }
 
+/**
+ * CAR-HEART-ALWAYS-001: the list id the car sends when the listener has no playlist and picks "New playlist"
+ * (CarPickList.NEW_LIST), and the name of the list that makes (CarPickList.NEW_LIST_NAME). It is made once: the
+ * next pick finds it by that name.
+ */
+export const CAR_NEW_LIST = 'airwave:new-list';
+export const CAR_NEW_LIST_NAME = 'Car picks';
 /** CAR-LOCAL-001: the car's "On this phone" list id (MediaHub.PHONE_LIST): songs held on the phone. */
 export const PHONE_LIST = 'airwave:on-this-phone';
 
@@ -207,15 +228,28 @@ export function pushMediaState(partial: Partial<NativeState>): void {
   send({ state: lastState });
 }
 
-/** Push the browsable library (the song list and the playlists). Larger and rare (list changes). */
-export function pushMediaLibrary(songs: NativeSong[], playlists: NativeFolder[]): void {
+/**
+ * Push the browsable library (the song list and the playlists). Larger and rare (list changes).
+ * PLAYLIST-KEEP-001: `null` playlists means "not read yet" — only the songs are sent, and the native side keeps
+ * the playlists it has. An empty array still means the listener really has none.
+ */
+export function pushMediaLibrary(songs: NativeSong[], playlists: NativeFolder[] | null): void {
+  if (playlists === null) {
+    lastLibrary = { songs, playlists: lastLibrary.playlists };
+    send({ state: lastState, library: { songs } });
+    return;
+  }
   lastLibrary = { songs, playlists };
   send({ state: lastState, library: lastLibrary });
 }
 
-function send(payload: { state: NativeState; library?: { songs: NativeSong[]; playlists: NativeFolder[] }; search?: { requestId: string; query: string; songs: NativeSong[]; albums?: NativeAlbum[]; play?: string; error?: string }; identify?: { requestId: string; songs: NativeSong[]; error?: string };
+function send(payload: { state: NativeState; library?: { songs: NativeSong[]; playlists?: NativeFolder[] }; search?: { requestId: string; query: string; songs: NativeSong[]; albums?: NativeAlbum[]; play?: string; error?: string }; identify?: { requestId: string; songs: NativeSong[]; error?: string };
   similar?: { requestId: string; id: string; added: number; minimum?: number; reason?: string; songs: NativeSong[]; error?: string };
-  mood?: { requestId: string; order: string[]; moved: string[]; changed: boolean; leading: string[]; error?: string } }): void {
+  /** MOOD-DEFAULT-CAR-001: the answer to the car's "Discover for my mood". */
+  moodDiscover?: { requestId: string; added: number; leading: string[]; reason?: string; songs: NativeSong[]; error?: string };
+  mood?: { requestId: string; order: string[]; moved: string[]; changed: boolean; leading: string[]; error?: string };
+  /** CAR-ANSWERABLE-001: which artists the car's Star the artist press really saved, or why none did. */
+  starArtists?: { requestId: string; id: string; names: string[]; error?: string } }): void {
   const n = nativeMedia();
   if (typeof n?.media !== 'function') return;
   try {
@@ -234,6 +268,31 @@ export function pushSourceUpdates(updates: { id: string; key: string; ready: boo
   if (typeof n?.media !== 'function' || !updates.length) return;
   try {
     n.media(JSON.stringify({ sourceUpdates: updates }));
+  } catch {
+    /* as send(): drop rather than crash */
+  }
+}
+
+/**
+ * QUEUE-HEARD-001: songs a listening top-up found while the phone app was closed, for the end of the engine's queue
+ * (EnginePlayer.appendFound, through CatalogEngine.media). The native side drops any it already has.
+ */
+/** CAR-SAVE-HIDDEN-001: a car save the service engine could not make goes back to be kept for the phone app. */
+export function pushCarUnsaved(cmd: { type: string; id: string }): void {
+  const n = nativeMedia();
+  if (typeof n?.media !== 'function') return;
+  try {
+    n.media(JSON.stringify({ carUnsaved: cmd }));
+  } catch {
+    /* as send(): drop rather than crash */
+  }
+}
+
+export function pushQueueTopUp(songs: NativeSong[]): void {
+  const n = nativeMedia();
+  if (typeof n?.media !== 'function' || !songs.length) return;
+  try {
+    n.media(JSON.stringify({ queueTopUp: songs.slice(0, 60) }));
   } catch {
     /* as send(): drop rather than crash */
   }
@@ -313,7 +372,7 @@ export function samplesFromPcm16(b64: string): Float32Array {
 export function installMediaCommands(): void {
   if (typeof window === 'undefined') return;
   (window as unknown as { __awMediaCmd?: (json: string) => void }).__awMediaCmd = (json: string) => {
-    let cmd: { type?: string; requestId?: string; positionMs?: number; index?: number; id?: string; query?: string; on?: boolean; mode?: number | string; album?: boolean; kind?: string; pcm?: string; list?: string; track?: unknown; current?: unknown; upcoming?: unknown; signal?: unknown; value?: unknown };
+    let cmd: { type?: string; requestId?: string; positionMs?: number; index?: number; id?: string; query?: string; on?: boolean; mode?: number | string; album?: boolean; kind?: string; pcm?: string; list?: string; track?: unknown; current?: unknown; upcoming?: unknown; signal?: unknown; value?: unknown; artist?: unknown };
     try {
       cmd = JSON.parse(json);
     } catch {
@@ -326,6 +385,7 @@ export function installMediaCommands(): void {
       case 'prev': handlers.prev?.(); break;
       case 'seek': handlers.seek?.(Math.max(0, Number(cmd.positionMs) || 0)); break;
       case 'playId': if (cmd.id) handlers.playId?.(String(cmd.id)); break;
+      case 'leave': if (typeof cmd.id === 'string' && cmd.id && cmd.id.length <= 500) handlers.leave?.(cmd.id); break;
       case 'playIndex': handlers.playIndex?.(Math.max(0, Number(cmd.index) || 0)); break;
       case 'search': handlers.search?.(String(cmd.query ?? '')); break;
       case 'catalogSearch': {
@@ -377,6 +437,20 @@ export function installMediaCommands(): void {
         })();
         break;
       }
+      case 'discoverMood': {
+        const requestId = String(cmd.requestId ?? '');
+        if (!requestId || requestId.length > 100) break;
+        void (async () => {
+          try {
+            if (!handlers.discoverMood) throw new Error('Open jPlay on your phone to discover for your mood.');
+            const out = await handlers.discoverMood();
+            send({ state: lastState, moodDiscover: { requestId, added: out.added, leading: out.leading.slice(0, 3), reason: out.reason, songs: out.songs.slice(0, 50) } });
+          } catch (e) {
+            send({ state: lastState, moodDiscover: { requestId, added: 0, leading: [], songs: [], error: String((e as Error)?.message ?? 'Could not discover for your mood').slice(0, 200) } });
+          }
+        })();
+        break;
+      }
       case 'moodOrder': {
         const requestId = String(cmd.requestId ?? '');
         const upcoming = Array.isArray(cmd.upcoming) ? (cmd.upcoming as unknown[]).filter((x): x is string => typeof x === 'string' && x.length > 0 && x.length <= 500).slice(0, 500) : [];
@@ -405,6 +479,24 @@ export function installMediaCommands(): void {
           if (t) handlers.feedback?.(String(cmd.id), cmd.kind as CarFeedbackKind, t); else handlers.feedback?.(String(cmd.id), cmd.kind as CarFeedbackKind);
         }
         break;
+      case 'starArtists':
+        if (typeof cmd.id === 'string' && cmd.id && cmd.id.length <= 500 && typeof cmd.artist === 'string' && cmd.artist.length <= 500) {
+          const t = carTrack(cmd.track, cmd.id);
+          const id = cmd.id;
+          const artist = cmd.artist;
+          // CAR-ANSWERABLE-001: with a requestId the car is waiting to hear whether this worked.
+          const requestId = typeof cmd.requestId === 'string' && cmd.requestId.length <= 100 ? cmd.requestId : '';
+          void (async () => {
+            try {
+              if (!handlers.starArtists) throw new Error('Open jPlay on your phone to star the artist.');
+              const names = await Promise.resolve(t ? handlers.starArtists(id, artist, t) : handlers.starArtists(id, artist));
+              if (requestId) send({ state: lastState, starArtists: { requestId, id, names: Array.isArray(names) ? names.slice(0, 6) : [] } });
+            } catch (e) {
+              if (requestId) send({ state: lastState, starArtists: { requestId, id, names: [], error: String((e as Error)?.message ?? 'Could not star the artist').slice(0, 200) } });
+            }
+          })();
+        }
+        break;
       case 'playlistAdd':
         if (typeof cmd.id === 'string' && cmd.id && typeof cmd.list === 'string' && cmd.list && cmd.list.length <= 200) {
           const t = carTrack(cmd.track, cmd.id);
@@ -429,4 +521,15 @@ export function carSettingsFrom(cmd: Record<string, unknown>): CarSettingsChange
   if (typeof a === 'number' && Number.isFinite(a) && a >= 0 && a <= 1) out.adventurous = a;
   if (typeof cmd['mood'] === 'boolean') out.mood_queue = cmd['mood'];
   return Object.keys(out).length ? out : null;
+}
+
+/**
+ * ARTIST-FAV-CAR-001: the artists to star for a song the car named: its own artist list when the song is known, else
+ * the credit line read as the car reads it (commas and "feat." separate artists; "&" stays inside a name).
+ */
+export function artistNamesOf(t: Pick<Track, 'artists'> | null | undefined, credit: string): string[] {
+  const own = (t?.artists ?? []).map((a) => String(a).trim()).filter(Boolean);
+  const names = own.length ? own : credit.replace(/[()[\]]/g, ' ').split(/\s*,\s*|\s+(?:feat\.?|ft\.?|featuring|with)\s+/i).map((x) => x.trim()).filter(Boolean);
+  const seen = new Set<string>();
+  return names.filter((n) => { const k = n.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, 6);
 }

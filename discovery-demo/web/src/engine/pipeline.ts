@@ -6,7 +6,7 @@
  * round-robin across seeds give the same candidates as the server would.
  */
 import * as A from './audio';
-import { tasteAsks, tasteWideAsk, TASTE_ASKS_PER_RUN, TASTE_RELATION, type Colour } from './taste-gather';
+import { tasteAsks, tasteWideAsk, deezerGenreTerms, TASTE_ASKS_PER_RUN, TASTE_RELATION, type Colour } from './taste-gather';
 import { type EngineConfig, TRANSFER } from './config';
 import { decodeToMono48k } from './decode';
 import { type Ctx, type Deezer, ProviderError, cached } from './deezer';
@@ -22,7 +22,10 @@ import type { Store } from './store';
 import type { YouTubeMusic } from './ytmusic';
 import type { Dict } from './shape';
 import type { Tag } from './genres';
+import * as G from './genres';
+import { cheapestFirst } from './queue-data-flow';
 
+import { walkCollaborators, collabSeedBudget, COLLAB_RUN_BUDGET } from './collab-walk';
 export interface Embedder {
   /** Trim, tempo and optionally the embedding for one decoded clip; may run on another thread. */
   analyse(
@@ -76,6 +79,15 @@ export async function pmap<T, R>(items: readonly T[], limit: number, fn: (x: T, 
 }
 
 type Rel = [Dict, string, string | null]; // track, relation, via
+
+
+/**
+ * WP8 / A7: how many catalogue-search rows one seed may keep. Apple's and Spotify's searches for the
+ * seed's own "artist title" answer from the same catalogue the seed came from - mostly versions of
+ * that very recording - and the relation does not count as relatedness, so a full 40 rows each only
+ * crowds out the lists that do. Ten per seed is plenty to pick up the other platforms' copies.
+ */
+export const SEARCH_MATCH_PER_SEED = 10;
 /** matchRecordings' verdict for an exact title and artist where one side has no duration (identity.ts). */
 const NO_LENGTH = 'no duration to compare';
 /** Whether a provider or a listener, rather than a guess of ours, has named this song's genre. */
@@ -187,6 +199,9 @@ export class Pipeline {
     deepAlbums: ReadonlySet<string> = new Set(),
     /** COLOR-DISCOVERY-001: the listener's colours and how far previous runs read into them. */
     colour: { colours: Colour[]; cursor: number } = { colours: [], cursor: 0 },
+    /** ARTIST-SIZE-001: an underground listener's run skips the genre charts, which list the biggest acts. */
+    /** QUEUE-DATA-FLOW-001: `cheapFirst` asks the small sources before YouTube Music (a top-up on mobile data). */
+    opts: { skipCharts?: boolean; cheapFirst?: boolean } = {},
   ): Promise<{ cands: Dict[]; related: Map<string, Set<string>> }> {
     const n = Math.max(1, seeds.length);
     const perSeed = Math.max(6, Math.ceil(cfg.perSourceCap / n));
@@ -194,6 +209,7 @@ export class Pipeline {
     const tasks: { source: string; seedKey: string; fn: () => Promise<Rel[]> }[] = [];
     const relatedNames = new Map<string, Set<string>>(seeds.map((s) => [String(s['key']), new Set<string>()]));
     const add = (source: string, seed: Dict, fn: () => Promise<Rel[]>) => tasks.push({ source, seedKey: String(seed['key']), fn });
+    const collabShared = { left: COLLAB_RUN_BUDGET, perSeed: collabSeedBudget(seeds.length) };
     const rel = (ts: Dict[], relation: string, via: string | null = null): Rel[] => ts.map((t) => [t, relation, via]);
 
     for (const s of seeds) {
@@ -205,12 +221,14 @@ export class Pipeline {
         add('ytmusic-radio', s, async () => rel(await this.ytm.radio(vid, perSeed + 1, c), 'radio'));
       }
       // Apple's catalogue is searched by the seed's own title and artist (the iTunes search is keyless and cached).
+      // WP8 / A7: asked for no more than the seed may keep, so the bytes are not fetched to be dropped.
+      const searchWant = Math.min(perSeed, SEARCH_MATCH_PER_SEED);
       const term = [s['artists']?.[0], s['title']].filter(Boolean).join(' ');
-      if (term.trim()) add('apple-search', s, async () => rel(await this.apple.search(term, perSeed, c), 'search_match'));
+      if (term.trim()) add('apple-search', s, async () => rel(await this.apple.search(term, searchWant, c), 'search_match'));
       // Spotify, through the anonymous web-player search on every platform (spotDL as the Windows
       // fallback). A failure just leaves this source empty.
       const spotify = this.spotifySearch;
-      if (term.trim() && spotify) add('spotify-search', s, async () => rel(await spotify(term, perSeed), 'search_match'));
+      if (term.trim() && spotify) add('spotify-search', s, async () => rel(await spotify(term, searchWant), 'search_match'));
       if (s['provider'] === 'soundcloud') {
         add('soundcloud-recommended', s, async () => rel(await this.sc.related(s as never, Math.min(perSeed, 20), c), 'sc_recommended'));
       }
@@ -228,6 +246,7 @@ export class Pipeline {
         const k = fresh ? 6 : 4;
         add('deezer-related-artists', s, () => this.relatedArtistTracks(dzArtist, k, job));
         add('deezer-recent', s, () => this.recent(dzArtist, fresh ? 6 : 3, cfg, job));
+        add('deezer-collaborators', s, () => this.collaborators(dzArtist, job, collabShared));
       }
     }
 
@@ -239,10 +258,12 @@ export class Pipeline {
       const dz = (profiles[String(s['key'])] as Dict)['dz'] as Dict | null;
       for (const g of (dz?.['tags'] as Dict[] | undefined) ?? []) tagNames.push({ name: g['name'], s });
     }
-    if (tagNames.length) {
+    if (tagNames.length && !opts.skipCharts) {
       const ids = await this.call<Record<string, number>>(job, 'deezer-genre-ids', () => this.dz.genreIds(c), {});
       for (const { name, s } of tagNames.slice(0, 2)) {
-        const gid = ids[name];
+        // genreIds is keyed by our canonical genre (normalize), not by Deezer's display name: asking
+        // for ids['Rap/Hip Hop'] never matched, so this source quietly never fired (GENRE-WORD-001).
+        const gid = ids[G.normalize(name) ?? ''] ?? ids[fold(name)] ?? ids[name];
         if (gid) add('deezer-genre-chart', s, async () => rel(await this.dz.genreChart(gid, 10, c), 'genre_chart', name));
       }
     }
@@ -255,8 +276,28 @@ export class Pipeline {
     asks.forEach((ask, i) => {
       const owner = seeds[i % seeds.length] as Dict | undefined;
       if (!owner) return;
-      const term = ask.kind === 'artist' ? `artist:"${ask.term}"` : ask.term;
-      add(`taste-${ask.kind}`, owner, async () => rel(await this.dz.search(term, 12, c, ask.page), TASTE_RELATION, ask.label));
+      if (ask.kind === 'artist') {
+        // No echo guard here: the term is a reference ARTIST, so songs by that artist are the answer.
+        add('taste-artist', owner, async () =>
+          rel(await this.dz.search(`artist:"${ask.term}"`, 12, c, ask.page), TASTE_RELATION, ask.label));
+        return;
+      }
+      // GENRE-WORD-001: a colour with no reference artists is asked for by Deezer's own genre id, so the
+      // answer is music Deezer files under that genre - not songs with the word in the title.
+      add('taste-genre', owner, async () => {
+        const ids = await this.call<Record<string, number>>(job, 'deezer-genre-ids', () => this.dz.genreIds(c), {});
+        let gid: number | undefined;
+        for (const name of deezerGenreTerms(ask.genre, ask.term)) {
+          gid = ids[G.normalize(name) ?? ''] ?? ids[fold(name)];
+          if (gid) break;
+        }
+        if (!gid) return [];
+        // A genre chart is about a hundred rows, so the run's page wraps rather than walking off the end.
+        const page = Math.max(0, ask.page) % 8;
+        const want = Math.min(100, 12 * (page + 1));
+        const hits = (await this.dz.genreChart(gid, want, c)).slice(page * 12);
+        return rel(hits, TASTE_RELATION, ask.label);
+      });
     });
 
     // Widening: one colour per run is followed out to the artists Deezer puts beside its reference
@@ -289,22 +330,59 @@ export class Pipeline {
       map.set(r.source, bySeed);
       bySeed.set(r.seedKey, [...(bySeed.get(r.seedKey) ?? []), ...r.out]);
     };
-    /** Round-robin merge of a result map; builds fresh copies, so it is safe to run on partial state. */
+    /**
+     * Round-robin merge of a result map; builds fresh copies, so it is safe to run on partial state.
+     *
+     * WP8 / A6: the cut down to `mergedCap` goes round-robin across the sources, not down the task
+     * list. Merging one source at a time and slicing the tail off afterwards let the handful of
+     * sources asked first (YouTube Music's two lists and the keyless catalogue searches for the
+     * seed's own "artist title") fill the whole cap, so Deezer's related artists, its recent
+     * releases, the genre charts and the listener's own colour sources were cut away whole. Each
+     * source now gives up its rows one round at a time, so no source is silenced by its position.
+     */
+    /** WP8 / A7: whether a row is one of this run's starting songs under another title or catalogue. */
+    const isSeedRecording = (t: Dict): boolean => seeds.some((sd) => matchRecordings(sd as never, t as never).verdict === 'same');
     const mergeFrom = (res: Map<string, Map<string, Rel[]>>): Dict[] => {
       const merged = new Map<string, Dict>();
       const order: string[] = [];
+      // Per source: the rows that survive the per-source cap, already round-robin across the seeds.
+      const bySource: { rows: { t: Dict; prov: Dict }[] }[] = [];
       for (const [source, bySeed] of res) {
         const lists = seeds.map((s) => bySeed.get(String(s['key'])) ?? []);
+        const rows: { t: Dict; prov: Dict }[] = [];
+        // WP8 / A7: the catalogue search for a seed's own "artist title" mostly turns up the same
+        // recording again and is not relatedness, so it keeps a fixed share per seed and no more.
+        const searchTaken = seeds.map(() => 0);
         let taken = 0;
         for (let i = 0; taken < cfg.perSourceCap && lists.some((l) => i < l.length); i++) {
           lists.forEach((lst, si) => {
-            if (i < lst.length && taken < cfg.perSourceCap) {
-              const [t, relation, via] = lst[i] as Rel;
-              if (relation === 'related_artist_top') relatedNames.get(String((seeds[si] as Dict)['key']))?.add(fold(String((t['artists'] as string[])[0] ?? '')));
-              this.merge(merged, order, t, { seed: (seeds[si] as Dict)['key'], relation, rank: i, source, via });
-              taken += 1;
+            if (i >= lst.length || taken >= cfg.perSourceCap) return;
+            const [t, relation, via] = lst[i] as Rel;
+            // WP8 / A7: a row matchRecordings calls the same recording as a starting song is that song
+            // again (a remaster title, another catalogue's copy), not a find: it is dropped here, before
+            // it can take a per-source, per-seed search or mergedCap slot. An uncertain verdict is kept.
+            if (isSeedRecording(t)) return;
+            if (relation === 'search_match') {
+              if ((searchTaken[si] as number) >= SEARCH_MATCH_PER_SEED) return;
+              searchTaken[si] = (searchTaken[si] as number) + 1;
             }
+            if (relation === 'related_artist_top') relatedNames.get(String((seeds[si] as Dict)['key']))?.add(fold(String((t['artists'] as string[])[0] ?? '')));
+            rows.push({ t, prov: { seed: (seeds[si] as Dict)['key'], relation, rank: i, source, via } });
+            taken += 1;
           });
+        }
+        bySource.push({ rows });
+      }
+      // The cap itself, taken a round at a time across the sources. A row that merges into a song
+      // already held costs nothing; only a song kept in the queue counts against the cap.
+      let kept = 0;
+      for (let i = 0; kept < cfg.mergedCap && bySource.some((s) => i < s.rows.length); i++) {
+        for (const s of bySource) {
+          const r = s.rows[i];
+          if (!r || kept >= cfg.mergedCap) continue;
+          const before = order.length;
+          this.merge(merged, order, r.t, r.prov);
+          if (order.length > before && r.t['kind'] !== 'video') kept += 1;
         }
       }
       // user uploads / mixes are not songs
@@ -316,7 +394,9 @@ export class Pipeline {
     const live = new Map<string, Map<string, Rel[]>>();
     let partialFired = false;
     let tasksDone = 0;
-    const done = await pmap(tasks, 4, async (t) => {
+    // QUEUE-DATA-FLOW-001: only the order of asking changes; the merge below still reads the answers in task order.
+    const asking = opts.cheapFirst ? cheapestFirst(tasks) : tasks;
+    const answered = await pmap(asking, 4, async (t) => {
       const r = { ...t, out: await this.call(job, `${t.source}:${(t.seedKey.split('|')[1] ?? '').slice(0, 30)}`, t.fn, [] as Rel[]) };
       addTo(live, r);
       tasksDone += 1;
@@ -329,12 +409,20 @@ export class Pipeline {
       }
       return r;
     });
+    const done = opts.cheapFirst ? tasks.map((t) => answered[asking.indexOf(t)]!) : answered;
     for (const t of done) addTo(results, t);
     const sims = await pmap(similar, 4, async (t) => ({ ...t, out: await this.call(job, `ytmusic-similar-artists:${(t.seedKey.split('|')[1] ?? '').slice(0, 30)}`, t.fn, [] as string[]) }));
     for (const t of sims) for (const name of t.out) relatedNames.get(t.seedKey)?.add(fold(name));
 
     const cands = mergeFrom(results);
     return { cands: cands.slice(0, cfg.mergedCap), related: relatedNames };
+  }
+
+  /** DISCOVER-BREADTH-001: songs by artists who share a verified Deezer credit with this artist, up to three steps out. */
+  private async collaborators(artistId: string, job: Job, shared: { left: number; perSeed: number }): Promise<Rel[]> {
+    const c = this.ctx(job);
+    const hits = await walkCollaborators({ id: artistId, name: artistId }, (id) => this.dz.artistTopCredits(id, 25, c), { check: () => job.token.check(), shared, budget: shared.perSeed });
+    return hits.map((h) => [h.track, `collab_${h.hop}`, h.via] as Rel);
   }
 
   private async relatedArtistTracks(artistId: string, k: number, job: Job): Promise<Rel[]> {

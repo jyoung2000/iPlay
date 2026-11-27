@@ -1,5 +1,6 @@
 import { chromium } from 'playwright';
-const SHOT = 'C:/Users/jalon/AppData/Local/hermes/cache/scratch';
+import { tmpdir } from 'node:os';
+const SHOT = process.env['AIRWAVE_SHOT_DIR'] ?? tmpdir();
 const browser = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: true });
 const out = {};
 for (const [name, vp] of [['desktop', { width: 1280, height: 800 }], ['phone', { width: 390, height: 844 }]]) {

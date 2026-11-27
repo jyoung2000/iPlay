@@ -25,7 +25,7 @@ beforeEach(() => {
   vi.mocked(api.last).mockResolvedValue(result);
   vi.mocked(api.settings).mockResolvedValue(null as never);
   vi.mocked(api.rerank).mockResolvedValue({ ...result, taste: null } as never);
-  vi.mocked(api.mood).mockResolvedValue({ order: ['rap', 'elec', 'jazz'], changed: true, moved: ['elec', 'jazz'], gain: 0.1, leading: ['Rap', 'Electronic'], confidence: 0.8 } as never);
+  vi.mocked(api.mood).mockResolvedValue({ order: ['rap', 'elec', 'jazz'], changed: true, moved: ['elec', 'jazz'], gain: 0.1, leading: ['Rap', 'Electronic'], confidence: 0.8, mood: true } as never);
 });
 
 describe('the listening mood re-arranges the now playing queue', () => {
@@ -37,6 +37,10 @@ describe('the listening mood re-arranges the now playing queue', () => {
     await waitFor(() => expect(api.mood).toHaveBeenCalled(), { timeout: 3000 });
     const body = vi.mocked(api.mood).mock.calls.at(-1)![0] as { upcoming: { track: Track }[] };
     expect(body.upcoming.map((u) => u.track.key)).toEqual(['rap', 'jazz', 'elec']);
+    // SAVE-MENU-STAY-001: the like opened the playlist menu, and the rows hold still under it. The new order shows
+    // the moment the menu is closed.
+    expect(titles()).toEqual(['Rap song', 'Jazz song', 'Electronic song']);
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     await waitFor(() => expect(titles()).toEqual(['Rap song', 'Electronic song', 'Jazz song']));
     expect(screen.getByRole('status', { name: /Queue re-arranged for your mood/ }).textContent).toMatch(/Rap · Electronic/);
   });

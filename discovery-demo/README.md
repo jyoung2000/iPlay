@@ -41,7 +41,7 @@ cd ../server && PYTHONPATH= uv run --frozen pytest -q -p no:warnings
 cd .. && node start.mjs --port 8787
 ```
 
-`web` is not a pnpm workspace member; if `pnpm` cannot resolve its scripts, use the pinned hoisted tools from `web/`: `node ../../node_modules/typescript/bin/tsc -p tsconfig.json --noEmit`, `node ../../node_modules/vitest/vitest.mjs run --root . --dir src --exclude '**/live.smoke.test.ts'`, `node ../../node_modules/vite/bin/vite.js build`. The development server runs at `http://127.0.0.1:8787/`; `?local=1` selects the browser-local TS engine for testing, but provider fetches can fail CORS outside the native bridge. The actual Windows and Android build commands are below. Compare baseline and v2 with `web/src/engine/benchmark.ab.test.ts`; reports and pinned upstream repository reviews are in `D:/MusicRecommendationLab/reports/` and `benchmarks/`.
+`web` is not a pnpm workspace member; if `pnpm` cannot resolve its scripts, use the pinned hoisted tools from `web/`: `node ../../node_modules/typescript/bin/tsc -p tsconfig.json --noEmit`, `node ../../node_modules/vitest/vitest.mjs run --root . --dir src --exclude '**/live.smoke.test.ts'`, `node ../../node_modules/vite/bin/vite.js build`. The development server runs at `http://127.0.0.1:8787/`; `?local=1` selects the browser-local TS engine for testing, but provider fetches can fail CORS outside the native bridge. The actual Windows and Android build commands are below. Compare baseline and v2 with `web/src/engine/benchmark.ab.test.ts`; reports and pinned upstream repository reviews are in `<research-workspace>/reports/` and `benchmarks/`.
 
 ## Two apps, one engine
 

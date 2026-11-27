@@ -5,9 +5,19 @@
  */
 import type { RecItem } from '../api';
 
+/**
+ * WP1 (plan 2026-11-24, A8) / QUEUE-ADD-001: a row the listener added by hand is pinned. Find-similar and custom-discovery
+ * rows carry `found` instead and are movable. Old stored queues marked those `added` too: a row with `added` plus
+ * `custom: true` or a `sound_match` key is read as a found row.
+ */
+export function isPinned(x: RecItem): boolean {
+  const r = x as RecItem & { custom?: boolean; sound_match?: unknown };
+  return Boolean(x.added) && !x.found && !r.custom && !('sound_match' in r);
+}
+
 export function moodMovable(items: RecItem[], o: { currentKey: string | null; played: ReadonlySet<string>; hidden?: ReadonlySet<string> }): RecItem[] {
   const at = o.currentKey ? items.findIndex((x) => x.track.key === o.currentKey) : -1;
-  return items.filter((x, i) => i > at && !x.added && !o.played.has(x.track.key) && !o.hidden?.has(x.track.key) && x.track.key !== o.currentKey);
+  return items.filter((x, i) => i > at && !isPinned(x) && !o.played.has(x.track.key) && !o.hidden?.has(x.track.key) && x.track.key !== o.currentKey);
 }
 
 /** The list with the movable songs in `order`; every other row stays where it was. */
@@ -18,6 +28,23 @@ export function placeMood(items: RecItem[], order: string[]): RecItem[] {
   const present = new Set(queue);
   let j = 0;
   const out = items.map((x) => (want.has(x.track.key) && present.has(x.track.key) ? byKey.get(queue[j++]!)! : x));
+  return out.map((x, i) => (x.rank === i + 1 ? x : { ...x, rank: i + 1 }));
+}
+
+/**
+ * QUEUE-NEXT-001: the song the player will play next (a shuffle or mood pick, or the next song that is ready) sits
+ * directly after the song playing, so the queue says what the player will do. Ranks follow the new order. Returns
+ * the same array when it already agrees, or when there is nothing to move (no song playing in the list, no next song,
+ * or the next song is above the song playing, as in a repeat round).
+ */
+export function pinNext(items: RecItem[], playingKey: string | null, nextKey: string | null): RecItem[] {
+  if (!playingKey || !nextKey || playingKey === nextKey) return items;
+  const at = items.findIndex((x) => x.track.key === playingKey);
+  const from = items.findIndex((x) => x.track.key === nextKey);
+  if (at < 0 || from <= at || from === at + 1) return items;
+  const out = [...items];
+  const [moved] = out.splice(from, 1);
+  out.splice(at + 1, 0, moved!);
   return out.map((x, i) => (x.rank === i + 1 ? x : { ...x, rank: i + 1 }));
 }
 

@@ -21,7 +21,7 @@ Verification:
 - Windows stays version-aligned at 0.18.1; portable, installer, unpacked executable signatures Valid;
   packaged app launched and returned its 0.18.1 bridge version.
 
-Evidence: `C:/Users/jalon/AppData/Local/hermes/testing/native-album/` contains the actual
+Evidence: `<test-artifacts>/native-album/` contains the actual
 `release-media-session.txt`, `release-system-ui.xml`, `page.json`, test/build logs and Windows build.
 
 This patch does not claim completion of the separate instant-play request or new Android Auto DHU

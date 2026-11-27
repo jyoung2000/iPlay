@@ -13,4 +13,4 @@ The existing cache checkmark and screen-reader readiness text remain, and ready 
 - Web, release APK and signed Windows setup/portable built successfully.
 - Real packaged Windows + release APK: actual ready buttons use background `rgb(230, 239, 251)` and icon `rgb(31, 111, 209)`; neutral CSS negative control is transparent with `rgb(86, 91, 96)` icon. Test profiles happened to have all visible tracks cached, so non-ready runtime transitions are covered by component tests, not claimed as native eviction testing.
 - Clicking a ready button activated the intended song on both Windows (“Naked”) and Android (“overseas”). APK installed as 0.18.11/vc54.
-- Native evidence: `C:/Users/jalon/AppData/Local/hermes/testing/ready-play/{windows,android}.{json,png}`.
+- Native evidence: `<test-artifacts>/ready-play/{windows,android}.{json,png}`.

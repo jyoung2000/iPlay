@@ -62,7 +62,8 @@ it('opens albums and same-title singles from album text beneath the search song 
     const text = row.querySelector('.track__text')!;
     const album = text.querySelector<HTMLButtonElement>('button.song-credits__album');
     expect(album).toBeTruthy();
-    expect(album!.textContent).toBe(track.album);
+    // ALBUM-NAME-001: a same-title single reads "Single"; an album its name.
+    expect(album!.textContent).toBe(track === single ? 'Single' : track.album);
     expect(album!.classList.contains('iconbtn')).toBe(false);
     expect(album!.querySelector('svg')).toBeNull();
     expect(row.querySelector('.track__actions [aria-label^="Open the album"]')).toBeNull();
@@ -114,7 +115,11 @@ it('opens an album like a list: its songs in order, played as one list, and save
   await act(async () => byText('Play album')!.click());
   expect(play).toHaveBeenCalledWith(full.tracks[0], full.tracks);
   // ALBUM-SAVE-001 replaced “Save as a list”: the album is saved as an album (saved-albums-ui.test.tsx).
-  await act(async () => byText('Save album')!.click());
+  // ALBUM-TIDY-001: the save is a heart alone, the folder download an arrow alone, and the card prints no "Sound of".
+  const heart = button('Save album Lost Files')!;
+  expect(heart.textContent?.trim()).toBe('');
+  expect(heart.querySelector('svg')).toBeTruthy();
+  await act(async () => heart.click());
   expect(editCall).toHaveBeenCalledWith('save_album', { album: full });
   expect(lists).toHaveBeenCalledWith([{ id: 'L9', name: 'Lost Files', count: 2 }]);
   await act(async () => button('Back')!.click());
@@ -144,7 +149,8 @@ it('opens albums from text credits in queue and saved rows, including singles', 
   open.mockReset();
   await draw(<SavedView saved={[{ track: onAlbum, ts: 1 }, { track: single, ts: 2 }] as never} lists={[]} onLists={() => {}} onPreview={() => {}} onRemoveSaved={() => {}} onOpenAlbum={open} />);
   const savedAlbums = [...host.querySelectorAll<HTMLButtonElement>('.track__text button.song-credits__album')];
-  expect(savedAlbums.map((b) => b.textContent)).toEqual(['A Great Chaos', 'Rock N Roll']);
+  // ALBUM-NAME-001: the same-title single reads "Single" (and still opens it).
+  expect(savedAlbums.map((b) => b.textContent)).toEqual(['A Great Chaos', 'Single']);
   for (const b of savedAlbums) await act(async () => b.click());
   expect(open.mock.calls).toEqual([[onAlbum], [single]]);
 });

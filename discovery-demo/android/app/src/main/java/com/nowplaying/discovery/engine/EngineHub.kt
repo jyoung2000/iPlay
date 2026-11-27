@@ -180,8 +180,11 @@ object EngineHub {
 
   private fun replayLibrary(p: EnginePlayer) {
     val s = MediaHub.state
-    p.libraryChanged(s.queue, s.shuffle, s.repeat)
+    p.libraryChanged(s.queue, s.shuffle, s.repeat, s.once)
   }
+
+  /** Tests only: an empty native queue, so a test that took songs out does not shape the next one. */
+  internal fun forgetQueueForTests() { player?.forgetQueueForTests() }
 
   /** Forget [pg] if it is still the page (a newer Activity may already have attached its own). */
   fun detachPage(pg: EnginePlayer.Page) = main.post { if (page === pg) { page = null; player?.page = null } }
@@ -212,13 +215,13 @@ object EngineHub {
   /** The page pushed its list/library through MediaHub: let the player follow it. */
   fun libraryChanged() = main.post {
     val s = MediaHub.state
-    player?.libraryChanged(s.queue, s.shuffle, s.repeat)
+    player?.libraryChanged(s.queue, s.shuffle, s.repeat, s.once)
   }
 
   private fun dispatch(p: EnginePlayer, cmd: JSONObject) {
     when (cmd.optString("op")) {
       "radio-meta" -> p.pageRadioMetadata(
-        cmd.optString("id"), cmd.optString("title"), cmd.optString("artist"), cmd.optString("artwork"),
+        cmd.optString("id"), cmd.optString("title"), cmd.optString("artist"),
         song = songFrom(cmd.optJSONObject("song")), track = cmd.optJSONObject("track"),
         startMs = cmd.optDouble("start", Double.NaN).takeIf { it.isFinite() && kotlin.math.abs(it) < 1e7 }?.let { (it * 1000).toLong() },
         lengthMs = cmd.optDouble("duration", Double.NaN).takeIf { it.isFinite() && it > 0 && it < 1e6 }?.let { (it * 1000).toLong() },
@@ -246,6 +249,12 @@ object EngineHub {
       else -> Log.w(TAG, "unknown op ${cmd.optString("op").take(40)}")
     }
   }
+
+  /**
+   * QUEUE-HEARD-001: songs the service page's listening top-up found while no phone page is open, for the end of the
+   * queue (EnginePlayer.appendFound ignores this while a page is open and drops songs already queued). Main thread.
+   */
+  fun appendFound(songs: List<MediaHub.Song>): Int = player?.appendFound(songs) ?: 0
 
   /** A song the page sent. Its file is trusted only through an allowed download link, and only when ready. */
   private fun songFrom(o: JSONObject?): MediaHub.Song? {

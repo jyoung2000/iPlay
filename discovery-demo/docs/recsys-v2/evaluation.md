@@ -1,6 +1,6 @@
 # Evaluation — recsys-v2 against the original engine
 
-Date: 2026-11-01. Reproducible benchmark harness: `discovery-demo/web/src/engine/benchmark.ab.test.ts`; frozen pool and controlled scenario results: `D:/MusicRecommendationLab/benchmarks/frozen-pool-ab.json` and `scenario-ab.json`. Same clock, seed set, candidate set, and history slice for v1 and v2; chronological split uses only the earliest 70% (2 of 4 events) as training history. Retrieval was held fixed. Golden fixture is synthetic and is primarily a parity/invariant fixture, **not** ground truth human preference.
+Date: 2026-11-01. Reproducible benchmark harness: `discovery-demo/web/src/engine/benchmark.ab.test.ts`; frozen pool and controlled scenario results: `<research-workspace>/benchmarks/frozen-pool-ab.json` and `scenario-ab.json`. Same clock, seed set, candidate set, and history slice for v1 and v2; chronological split uses only the earliest 70% (2 of 4 events) as training history. Retrieval was held fixed. Golden fixture is synthetic and is primarily a parity/invariant fixture, **not** ground truth human preference.
 
 | Metric | Original | v2 | Interpretation |
 |---|---:|---:|---|

@@ -3,12 +3,12 @@
  * needs no server. `handle()` takes what the UI would have sent to /api/* and returns what the server
  * would have answered, status code included. Jobs run as async tasks; the browser polls them as before.
  */
-import { applyAlgorithmPatch, engineFromSettings, settingsWithAlgorithms } from './algorithms';
+import { BUILT_IN_ID, activeAlgorithm, applyAlgorithmPatch, engineFromSettings, settingsWithAlgorithms } from './algorithms';
 import * as A from './audio';
 import { isSimilarityPercent, selectSimilar, soundMatch, SIMILAR_DEFAULT, SIMILAR_FLOOR, SIMILAR_LIMIT, type SoundHit, type SoundTrack } from './similar-sound';
 import { customOutcome, normaliseCriteria, runCustomDiscovery, songIdOf, type CandidateTrack, type CustomCriteria, type CustomPorts } from './custom-discovery';
 import { genreIdentity } from './genre-identity';
-import { MOOD, buildMood, moodFit, moodOrder, moodTags, type MoodCandidate, type MoodKind, type MoodSignal } from './mood-queue';
+import { MOOD, buildMood, moodFit, moodOrder, moodTags, type MoodCandidate, type MoodKind, type MoodPlanVersion, type MoodSignal } from './mood-queue';
 /** CAR-MOOD-001: the presses the car may send with a mood question. */
 const CAR_MOOD_KINDS = new Set(['like', 'dislike', 'similar', 'complete', 'skip']);
 import type { Track as NativeTrack } from './track';
@@ -16,6 +16,7 @@ import { DEFAULT_ENGINE, TRANSFER, engineWithWeights } from './config';
 import { EQ_DEFAULTS, parseEq } from './eq';
 import { PLAY_THROUGH_DEFAULT, clampPlayThrough, clampSlider } from './crossfade';
 import { appendDiscovery, needsListeningDiscovery, newDiscoveryTracks } from './discovery';
+import { carryPool, unionRelated, unionSeeds } from './pool-carry';
 import {
   PLAYLIST_TRACKS_MAX,
   PlaylistError,
@@ -51,6 +52,7 @@ const IMPORTED_SOURCE_TTL = 10 * 365 * 86400;
 
 import { buildProfile } from './profile';
 import { playlistMix } from './playlist-mix';
+import { parseHeld, shapeLists, type Held } from './playlist-delta';
 import { albumGenres, baseAlbumTitle, releaseGroupId, tagsFromReleaseGroup } from './album-genres';
 import { seedWindow } from './seed-window';
 import type { Tag } from './genres';
@@ -58,16 +60,23 @@ import { classify, classifyAll } from './classify';
 import { makeTag } from './genres';
 import { inferFromArtist, inferFromSeed, inferFromSound, needsSub, recordArtistGenres, withoutNamesake, currentTags } from './infer';
 import { fillGenres, mainGenre, stylesFor, subLabels } from './genre-fill';
+import { Budget, type Lane } from './budget';
 import { BlockedUrl, BudgetExceeded, Cancelled, FetchError, Http, type HttpPort, Meter } from './net';
 import { dl, downloadsAvailable } from './downloads';
 import { localAudioUrl } from './local-audio';
 import { Job, Pipeline, pmap, type Embedder } from './pipeline';
+import { FAV_ARTISTS_KEY, FAV_PER_RUN, addFav, favMap, favSeed, normaliseFav, normaliseFavs, removeFav, type FavArtist } from './fav-artists';
+import { referenceSize, sizeFit, smallScene } from './artist-size';
+import { coldReason, coldStarters, type ColdStarter } from './cold-start';
+import { artistLoad, selectNeverDry, withRecentListens } from './artist-variety';
+import { FLOW_KEY, discoveryHeardTest, dryReason, flowPick, flowState } from './queue-data-flow';
 import { SOURCE_LABELS, cleanTrack, playbackFor, round, type Dict } from './shape';
 import { AppleMusic } from './apple';
 import { Albums } from './albums';
 import { ArtistNotOpened, Artists, partitionFeatures, type ArtistSource } from './artists';
 import { ArtistExtrasReader } from './artist-extras';
 import { albumKeyOf } from './album-key';
+import { ALBUM_LOOKUP_VERSION, albumFromMusicBrainz, realAlbumFrom, wantsAlbum } from './album-name';
 import { SoundCloud } from './soundcloud';
 import { Bandcamp } from './bandcamp';
 import { Audius } from './audius';
@@ -78,6 +87,7 @@ import type { Store } from './store';
 import { YouTubeMusic } from './ytmusic';
 import { Genius, Shazam } from './listen/providers';
 import { resolveHits, type Evidence } from './listen/identify';
+import { breadthFor } from './breadth';
 import { canMatch, confidentMatch, enrichImported, statedTags, uniqueTags } from './imported-genres';
 
 export interface LocalDeps {
@@ -88,7 +98,7 @@ export interface LocalDeps {
   now?: () => number;
   /** Spotify search, only where a shell can run spotDL (Windows). Absent on Android, where Spotify search is unavailable. */
   /** Builds the Spotify search on this api's own Http client. Absent only in tests. */
-  spotifySearch?: (http: Http) => (q: string, limit: number) => Promise<Dict[]>;
+  spotifySearch?: (http: Http, store?: Store) => (q: string, limit: number) => Promise<Dict[]>;
 }
 
 export interface LocalResponse {
@@ -144,15 +154,19 @@ const FEATURE_SLICE_MS = 2500;
 /** MOOD-DISCOVER-001: when the mood last asked for songs, and how often it may. */
 const MOOD_DISCOVERY_AT = 'mood_discovery_at';
 const MOOD_DISCOVERY_EVERY_S = 600;
-const DEFAULT_SETTINGS = { fresh: false, adventurous: 0.5, audio: true, daily_mb: TRANSFER.daily / 1e6, request_mb: TRANSFER.perRequest / 1e6, sample_mode: false, queue_size: DEFAULT_ENGINE.queueSize, similar_percent: SIMILAR_DEFAULT, cache_gb: 1, dl_parallel: 0, preload_target: 'all' as 'all' | 'count', preload_count: 20, discover_while_listening: true, mood_queue: true, rank_v2: true, eq: EQ_DEFAULTS, mix: 0, local_mix: true, play_through: PLAY_THROUGH_DEFAULT };
+/** AA-TOPUP-60-001: the distinct-first-play count at the last 60% top-up; a top-up needs a new first play after it. */
+const TOPUP_HEARD_AT = 'topup_heard_at';
+const DEFAULT_SETTINGS = { fresh: false, adventurous: 1.0, audio: true, daily_mb: TRANSFER.daily / 1e6, request_mb: TRANSFER.perRequest / 1e6, sample_mode: false, queue_size: DEFAULT_ENGINE.queueSize, similar_percent: SIMILAR_DEFAULT, cache_gb: 1, dl_parallel: 0, preload_target: 'all' as 'all' | 'count', preload_count: 20, discover_while_listening: true, mood_queue: true, mood_lead: true, genre_run_limit: 8, rank_v2: true, eq: EQ_DEFAULTS, mix: 0, local_mix: true, play_through: PLAY_THROUGH_DEFAULT };
 /** How many songs one discovery run adds to the list: the user's choice in Settings. */
 export const QUEUE_SIZE_MIN = 5;
 export const QUEUE_SIZE_MAX = 60;
-const FEEDBACK_KINDS = new Set(['qualified', 'like', 'dislike', 'hide', 'save', 'replay', 'complete', 'skip', 'unlike', 'unsave', 'undislike', 'unhide']);
+const FEEDBACK_KINDS = new Set(['qualified', 'like', 'dislike', 'hide', 'save', 'replay', 'complete', 'skip', 'partial', 'unlike', 'unsave', 'undislike', 'unhide']);
 /** PLAYLIST-QUEUE-001 store keys: the list now in the queue, the queue it replaced, the seed window. */
 const QUEUE_PLAYLIST_KEY = 'queue_playlist';
 /** Songs saved lists were made with (ALBUM-OPEN-001), by key, so a list made from an album shows every song. */
 const LIST_TRACKS_KEY = 'list_tracks';
+/** QUEUE-DATA-FLOW-001: how many of the listener's artists the listening top-ups walk through, a few per run. */
+const FLOW_POOL = 24;
 /** TAGS-ALWAYS-001: genres looked up for saved songs that had none, by song key. */
 const SAVED_TAGS_KEY = 'saved_tags';
 /** TAGS-ALWAYS-001: release dates looked up for saved songs that had none (key -> release or year hint). */
@@ -264,6 +278,7 @@ async function readAtMost(res: Response, max: number): Promise<Uint8Array | null
 export class LocalApi {
   readonly store: Store;
   readonly http: Http;
+  private readonly budget: Budget;
   readonly dz: Deezer;
   readonly ytm: YouTubeMusic;
   readonly sc: SoundCloud;
@@ -297,6 +312,10 @@ export class LocalApi {
     this.store = deps.store;
     this.encoder = deps.encoder;
     this.http = new Http(deps.port);
+    // ALLOWANCE-ARCH-001: one budget for every lane; the shell says whether the connection is metered.
+    this.budget = new Budget(this.store, () => Number(this.settings()['daily_mb']) * 1e6);
+    this.http.onMetered = (m) => this.budget.network(m);
+    void this.http.metered();
     this.dz = new Deezer(this.http, this.store);
     this.ytm = new YouTubeMusic(this.http, this.store);
     this.sc = new SoundCloud(this.http, this.store);
@@ -311,7 +330,7 @@ export class LocalApi {
     this.sp = new Spotify(this.http, this.store);
     this.genius = new Genius(this.http);
     this.shazam = new Shazam(this.http);
-    this.spotifySearch = deps.spotifySearch ? deps.spotifySearch(this.http) : null;
+    this.spotifySearch = deps.spotifySearch ? deps.spotifySearch(this.http, this.store) : null;
     this.pipeline = new Pipeline(this.store, this.http, this.dz, this.ytm, this.sc, this.apple, this.spotifySearch, this.encoder);
     this.store.expireImpressions(unixNow() - DEFAULT_ENGINE.exposureWindowDays * 86400 * 4);
   }
@@ -345,7 +364,7 @@ export class LocalApi {
     // song it could have rescued was reported as having no source. 8 MB is the native bridge's own
     // per-request ceiling (MainActivity.kt maxBytes). The id is then cached for a day, so the cost
     // is paid once rather than per song.
-    return new Meter(8_000_000, 8_000_000, (c, n) => this.store.addTransfer(c, n));
+    return this.budget.meter('playback', 8_000_000);
   }
 
   /**
@@ -356,17 +375,41 @@ export class LocalApi {
    * look a few seconds per request; each request's share is far under this cap.
    */
   private featureMeter(): Meter {
-    const daily = Math.trunc(Number(this.settings()['daily_mb']) * 1e6);
-    const used = Object.values(this.store.transferToday()).reduce((a, b) => a + b, 0);
-    return new Meter(12_000_000, Math.max(0, daily - used), (c, n) => this.store.addTransfer(c, n));
+    return this.budget.meter('interactive', 12_000_000);
   }
 
+  /**
+   * ALLOWANCE-ARCH-001: what the listener asked for (a search, an artist or album page). Counted, never
+   * refused for the allowance; the cap bounds one request only.
+   */
   private searchMeter(): Meter {
-    const daily = Math.trunc(Number(this.settings()['daily_mb']) * 1e6);
-    const used = Object.values(this.store.transferToday()).reduce((a, b) => a + b, 0);
     // Per-search cap sized so one search can read SoundCloud's ~2.9 MB client-id bundle plus the other
-    // providers' answers. The daily allowance (daily_mb) is the real limit and is unchanged.
-    return new Meter(6_000_000, Math.max(0, daily - used), (c, n) => this.store.addTransfer(c, n));
+    // providers' answers.
+    return this.budget.meter('interactive', 6_000_000);
+  }
+
+  /** ALLOWANCE-ARCH-001: work nobody asked for by hand. The only lane the allowance limits, and only on mobile data. */
+  private backgroundMeter(): Meter {
+    return this.budget.meter('background', 6_000_000);
+  }
+
+  /** One discovery batch: the listener's own when they started it, background when listening topped the queue up. */
+  private jobMeter(settings: Dict, lane: Lane): Meter {
+    return this.budget.meter(lane, Math.trunc(Number(settings['request_mb'] ?? TRANSFER.perRequest / 1e6) * 1e6));
+  }
+
+  /** When paused background work can carry on by itself, for an answer that had to stop. */
+  private resumes(): { resumes_at?: number } {
+    const at = this.budget.state().resumes_at;
+    return at ? { resumes_at: at } : {};
+  }
+
+  private netAsked = 0;
+  /** Asks the shell whether the connection is metered, at most twice a minute; costs no network. */
+  private async syncNetwork(): Promise<void> {
+    if (unixNow() - this.netAsked < 30) return;
+    this.netAsked = unixNow();
+    await this.http.metered();
   }
 
   // ---------------------------------------------------------------------------------------
@@ -390,7 +433,7 @@ export class LocalApi {
       if (m === 'POST' && path === '/api/radio/analyse') return await this.radioAnalyse(body ?? {});
       if (m === 'POST' && path === '/api/radio/genres') {
         const t = body?.['track'] as Dict; if (!t?.['key'] || !t?.['title']) return fail(400, 'A track is required');
-        const found = await this.lookUpGenres(t, this.searchMeter());
+        const found = await this.lookUpGenres(t, this.backgroundMeter());
         const tags = found.tags.length ? found.tags : this.knownGenres()(t);
         const enriched = { ...found.track, tags };
         const characteristics = this.genreFiller([{ track: enriched }])(enriched, characteristicsOf(enriched, null));
@@ -399,8 +442,13 @@ export class LocalApi {
       if (m === 'POST' && path === '/api/resolve') return await this.resolve(String(body?.['url'] ?? ''));
       if (m === 'POST' && path === '/api/complete-spotify') return ok(await this.completeSpotify(String(body?.['title'] ?? ''), String(body?.['artist'] ?? '')));
       if (path === '/api/seeds') return m === 'PUT' ? await this.putSeeds(body ?? {}) : ok(this.seedsView());
+      if (path === '/api/fav-artists') return m === 'POST' ? await this.editFavArtists(body ?? {}) : ok(this.favArtistsView());
       if (path === '/api/settings') return m === 'PUT' ? await this.putSettings(body ?? {}) : ok(this.settings());
-      if (m === 'POST' && path === '/api/recommend') return this.recommend(body ?? {});
+      if (m === 'POST' && path === '/api/recommend') {
+        // ALLOWANCE-ARCH-001: a top-up decides on the connection as it is now (the phone may have joined Wi-Fi since).
+        if (body?.['trigger'] === 'listening') await this.syncNetwork();
+        return this.recommend(body ?? {});
+      }
       if (m === 'POST' && path === '/api/similar') return this.similar(body ?? {});
       if (m === 'POST' && path === '/api/discover/custom') return this.discoverCustom(body ?? {});
       const job = /^\/api\/jobs\/([A-Za-z0-9]+)$/.exec(path);
@@ -414,7 +462,8 @@ export class LocalApi {
       if (m === 'POST' && path === '/api/embed-local') return await this.embedLocal(body ?? {});
       if (m === 'GET' && path === '/api/saved') return ok(this.saved());
       if (m === 'POST' && path === '/api/genres') return ok(await this.genresFor(((body ?? {})['tracks'] as Dict[] | undefined) ?? []));
-      if (m === 'GET' && path === '/api/playlists') return ok(this.playlists());
+      // PLAYLIST-DELTA-001: a caller that names the versions it holds is sent only the lists that changed.
+      if (m === 'GET' && path === '/api/playlists') return ok(this.playlists(parseHeld(q.get('have'))));
       if (m === 'POST' && path === '/api/playlists') return await this.playlistAction(body ?? {});
       if (m === 'GET' && path === '/api/status') return ok(await this.status());
       if (m === 'POST' && path === '/api/reset') return this.reset(Boolean(body?.['clear_cache']));
@@ -501,7 +550,8 @@ export class LocalApi {
     // ALLOWANCE-REFRESH-001: "Check again" also gives the day's download allowance back, before the
     // probes run, so the very next search, discovery or genre read has room. A plain read (the
     // Settings screen opening) never clears anything.
-    const refreshed = refresh ? { cleared_bytes: this.store.clearTransfer(), day: today() } : null;
+    // ALLOWANCE-ARCH-001: it also fills the background reserve at once.
+    const refreshed = refresh ? { cleared_bytes: this.store.clearTransfer(), restored_bytes: this.budget.refill(), day: today() } : null;
     if (refresh || !Object.keys(this.health).length || unixNow() - this.healthAt > 600) {
       this.healthRun ??= this.refreshHealth().finally(() => (this.healthRun = null));
       await this.healthRun;
@@ -1168,7 +1218,7 @@ export class LocalApi {
       let found: Dict | null = null;
       let ttl = 7 * 24 * 3600; // no confident match: not asked again for a week
       try {
-        found = await this.lookUpImported(next, this.searchMeter());
+        found = await this.lookUpImported(next, this.backgroundMeter());
         if (found) ttl = 30 * 24 * 3600;
       } catch (e) {
         if (e instanceof BudgetExceeded) return; // the day's allowance is spent: the next start carries on
@@ -1220,18 +1270,24 @@ export class LocalApi {
     const last = this.store.get<Dict>('last_result');
     const items = ((last?.['items'] ?? []) as Dict[]).slice();
     const more = (t: Dict): boolean => this.wantsArtist(t) || this.wantsYear(t);
-    const settled = (x: Dict): boolean => LocalApi.placed(x) && !LocalApi.guessed(x) && !more((x['track'] as Dict | undefined) ?? {});
+    // ALBUM-NAME-001: a row showing only its single's name is not settled until its album has been looked up.
+    const settled = (x: Dict): boolean => LocalApi.placed(x) && !LocalApi.guessed(x) && !more((x['track'] as Dict | undefined) ?? {}) && !wantsAlbum((x['track'] as Dict | undefined) ?? {});
     if (!last || items.every(settled)) return ok({ items: [], left: 0 });
-    const limit = Math.max(1, Math.min(12, Math.trunc(Number(body['limit'])) || 6));
+    // ALLOWANCE-ARCH-001: background work. On mobile data it draws on the reserve: smaller batches when it runs
+    // low, and none while it is paused (the answer says when it resumes).
+    await this.syncNetwork();
+    const limit = this.budget.batch(Math.max(1, Math.min(12, Math.trunc(Number(body['limit'])) || 6)));
+    if (limit === 0) return ok({ items: [], left: items.filter((x) => !settled(x)).length, spent: true, ...this.resumes() });
     const known = this.knownGenres();
-    const meter = this.searchMeter();
+    const meter = this.backgroundMeter();
     const taste = this.taste();
     // What each row shows now, to tell afterwards which rows changed.
     const shown = (list: Dict[]): string[] => {
       const fill = this.genreFiller(list);
       return list.map((x) => {
         const c = x['track'] ? fill(x['track'] as Dict, {}) : {};
-        return JSON.stringify([(x['track'] as Dict | undefined)?.['tags'] ?? [], c['styles'], c['fill'], c['main_off'] ?? null, c['genre_pending'] ?? false]);
+        const t = (x['track'] as Dict | undefined) ?? {};
+        return JSON.stringify([t['tags'] ?? [], c['styles'], c['fill'], c['main_off'] ?? null, c['genre_pending'] ?? false, t['album'] ?? null, t['album_looked'] ?? false]);
       });
     };
     const before = shown(items);
@@ -1290,6 +1346,36 @@ export class LocalApi {
             }
           }
         }
+        // ALBUM-NAME-001: the service answered with the song's single; find the album the song is on.
+        if (!waiting && wantsAlbum(dated)) {
+          if (!mayAsk()) waiting = true;
+          else {
+            const artist = artistName(track);
+            const title = String(track['title'] ?? '');
+            let found: { album: string; album_id: string | null; confirmed?: boolean } | null = null;
+            const bare = title.replace(/\s*[([](?:feat|ft|with)\b[^)\]]*[)\]]/gi, '');
+            try {
+              // Deezer first: its answer opens the album page. (Its artist:/track: form answers nothing here.)
+              const cands = await this.dz.search(`${artist} ${bare}`, 15, { meter });
+              found = realAlbumFrom(dated, cands as never);
+            } catch (e) {
+              if (e instanceof BudgetExceeded) throw e;
+            }
+            // Deezer often lists only the single; MusicBrainz lists every release the recording is on.
+            if (!found) {
+              try {
+                const q = `recording:"${bare.replace(/"/g, ' ')}" AND artist:"${artist.replace(/"/g, ' ')}"`;
+                const body = await cached(this.store, `mb:rec:${fold(artist)}:${fold(bare)}`, 'metadata', 30 * 24 * 3600, () =>
+                  this.http.getJson<Dict>(`https://musicbrainz.org/ws/2/recording?query=${encodeURIComponent(q)}&fmt=json&limit=10`, { maxBytes: 400_000, meter, category: 'metadata', headers: { 'user-agent': MUSICBRAINZ_UA, accept: 'application/json' } }));
+                const mb = albumFromMusicBrainz(body, dated);
+                if (mb) found = { album: mb.album, album_id: null, ...(mb.titleTrack ? { confirmed: true } : {}) };
+              } catch (e) {
+                if (e instanceof BudgetExceeded) throw e;
+              }
+            }
+            dated = { ...dated, album_looked: ALBUM_LOOKUP_VERSION, ...(found ? { album: found.album, album_confirmed: true, ...(found.album_id ? { album_id: found.album_id } : {}) } : {}) };
+          }
+        }
       } catch (e) {
         // The allowance is used up: say what is left rather than guess, and ask no more this time.
         if (!(e instanceof BudgetExceeded)) throw e;
@@ -1311,9 +1397,9 @@ export class LocalApi {
     items.forEach((x, i) => {
       const track = x['track'] as Dict | undefined;
       if (!track || after[i] === before[i]) return;
-      out.push({ key: String(track['key'] ?? ''), tags: track['tags'] ?? [], characteristics: fill(track, (x['characteristics'] as Dict | undefined) ?? {}) });
+      out.push({ key: String(track['key'] ?? ''), tags: track['tags'] ?? [], characteristics: fill(track, (x['characteristics'] as Dict | undefined) ?? {}), ...(track['album_looked'] ? { album: track['album'] ?? null, album_id: track['album_id'] ?? null, album_looked: track['album_looked'], album_confirmed: Boolean(track['album_confirmed']) } : {}) });
     });
-    return ok({ items: out, left, ...(spent ? { spent: true } : {}) });
+    return ok({ items: out, left, ...(spent ? { spent: true, ...this.resumes() } : {}) });
   }
 
   /**
@@ -1428,6 +1514,11 @@ export class LocalApi {
     if ('fresh' in body) cur['fresh'] = Boolean(body['fresh']);
     if ('adventurous' in body) cur['adventurous'] = Math.min(1, Math.max(0, Number(body['adventurous'])));
     for (const k of ['audio', 'sample_mode', 'rank_v2', 'discover_while_listening', 'mood_queue']) if (k in body) cur[k] = Boolean(body[k]);
+    // WP6: the mood plan's rollback switch ('v1' = the old order).
+    if ('mood_plan' in body) cur['mood_plan'] = body['mood_plan'] === 'v1' ? 'v1' : 'v2';
+    // 0.20.19: mood lead (on by default) and the same-genre run limit from row 13 on (0 = off; 3, 5 or 8).
+    if ('mood_lead' in body) cur['mood_lead'] = Boolean(body['mood_lead']);
+    if ('genre_run_limit' in body) { const n = Number(body['genre_run_limit']); cur['genre_run_limit'] = [0, 3, 5, 8].includes(n) ? n : 8; }
     if ('daily_mb' in body) cur['daily_mb'] = Math.min(2000, Math.max(5, Number(body['daily_mb'])));
     if ('request_mb' in body) cur['request_mb'] = Math.min(200, Math.max(2, Number(body['request_mb'])));
     if ('similar_percent' in body) {
@@ -1470,6 +1561,99 @@ export class LocalApi {
     return ok(settingsWithAlgorithms(cur));
   }
 
+  // ---- starred artists (ARTIST-FAV-001) and artist size (ARTIST-SIZE-001) ----------------------
+  /** ARTIST-FAV-ALGO-001: the active algorithm's starred artists; every other preset keeps its own. */
+  private favArtists(): FavArtist[] {
+    const alg = activeAlgorithm(this.settings());
+    const raw = this.store.get(FAV_ARTISTS_KEY);
+    const map = favMap(raw, alg.id);
+    // A list from before lists were per algorithm is pinned to the algorithm active now, once.
+    if (Array.isArray(raw)) void this.store.put(FAV_ARTISTS_KEY, map);
+    return map[alg.id] ?? [];
+  }
+
+  private favArtistsView(): Dict {
+    const alg = activeAlgorithm(this.settings());
+    return { artists: this.favArtists(), algorithm: { id: alg.id, name: alg.name } };
+  }
+
+  /** `{op: 'add', artist}`, `{op: 'remove', name}` or `{op: 'set', artists}`; answers with the whole list. */
+  private async editFavArtists(body: Dict): Promise<LocalResponse> {
+    const op = String(body['op'] ?? '');
+    let list = this.favArtists();
+    if (op === 'add') {
+      const a = normaliseFav(body['artist']);
+      if (!a) return fail(400, 'An artist with a name is needed.');
+      list = addFav(list, { ...a, addedAt: Date.now() });
+    } else if (op === 'remove') {
+      const name = String(body['name'] ?? '').trim();
+      if (!name) return fail(400, 'Which artist?');
+      list = removeFav(list, name);
+    } else if (op === 'set') {
+      list = normaliseFavs(body['artists']);
+    } else return fail(400, 'Unknown change to the artist list.');
+    // Only the active algorithm's list changes; lists of algorithms since deleted are dropped.
+    const s = this.settings();
+    const alg = activeAlgorithm(s);
+    const all = favMap(this.store.get(FAV_ARTISTS_KEY), alg.id);
+    const live = new Set([BUILT_IN_ID, ...((settingsWithAlgorithms(s)['algorithms'] as { id: string }[]) ?? []).map((a) => a.id)]);
+    const next: Record<string, FavArtist[]> = {};
+    for (const [id, l] of Object.entries(all)) if (live.has(id) && l.length) next[id] = l;
+    if (list.length) next[alg.id] = list; else delete next[alg.id];
+    await this.store.put(FAV_ARTISTS_KEY, next);
+    return ok(this.favArtistsView());
+  }
+
+  /** Each starred artist as a starting point, its Deezer id found by name when the star did not carry one. */
+  private async favSeeds(job: Job, favs: readonly FavArtist[]): Promise<{ seed: Dict; profile: Dict }[]> {
+    const c = { meter: job.meter ?? undefined, token: job.token };
+    return pmap(favs, 3, async (a) => {
+      let id = a.deezerId;
+      if (!id) id = await this.dz.artistByName(a.name, c).then((x) => x?.id ?? null, () => null);
+      return favSeed(a, id);
+    });
+  }
+
+  /** The typical Deezer follower count of the starting and starred artists, or null when none is known. */
+  private async sizeReference(job: Job, seedViews: readonly Dict[], profiles: Record<string, Dict>, favs: readonly FavArtist[]): Promise<number | null> {
+    const c = { meter: job.meter ?? undefined, token: job.token };
+    const byName = new Map(favs.map((f) => [fold(f.name), f]));
+    const asks = new Map<string, { id: string | null; name: string; fans: number | null }>();
+    for (const sv of seedViews) {
+      const name = String((sv['artists'] as string[] | undefined)?.[0] ?? '');
+      if (!name || asks.has(fold(name))) continue;
+      const fav = byName.get(fold(name));
+      const dz = ((profiles[String(sv['key'])]?.['dz'] as Dict | null)?.['artist_ids'] as Dict | undefined)?.['deezer'];
+      asks.set(fold(name), { id: typeof dz === 'string' && dz ? dz : fav?.deezerId ?? null, name, fans: fav?.fans ?? null });
+      if (asks.size >= 12) break;
+    }
+    const fans = await pmap([...asks.values()], 3, (a) => (a.fans !== null ? Promise.resolve(a.fans) : this.dz.artistFans(a.id, a.name, c).catch(() => null)));
+    return referenceSize(fans);
+  }
+
+  /** The size fit of each leading song's main artist; null when no artist could be sized. */
+  private async sizeFitFor(job: Job, reference: number, tracks: readonly Dict[]): Promise<((t: E.Track) => number | null) | null> {
+    const c = { meter: job.meter ?? undefined, token: job.token };
+    const artists = new Map<string, { id: string | null; name: string }>();
+    for (const t of tracks) {
+      const name = String((t['artists'] as string[] | undefined)?.[0] ?? '');
+      if (!name || artists.has(fold(name))) continue;
+      const dz = (t['artist_ids'] as Dict | undefined)?.['deezer'];
+      artists.set(fold(name), { id: typeof dz === 'string' && dz ? dz : null, name });
+      if (artists.size >= 80) break;
+    }
+    const list = [...artists.entries()];
+    const sizes = await pmap(list, 4, ([, a]) => this.dz.artistFans(a.id, a.name, c).catch(() => null));
+    const fans = new Map<string, number>();
+    list.forEach(([k], i) => { const n = sizes[i]; if (typeof n === 'number') fans.set(k, n); });
+    job.timings['sized_artists'] = fans.size;
+    if (!fans.size) return null;
+    return (t) => {
+      const n = fans.get(fold(String(t.artists?.[0] ?? '')));
+      return n === undefined ? null : sizeFit(n, reference);
+    };
+  }
+
   // ---- recommend -----------------------------------------------------------------------
   /**
    * Starts one discovery batch. Searching is one way in; finishing a song from a list that has
@@ -1480,19 +1664,40 @@ export class LocalApi {
     const settings = this.settings();
     const listening = body['trigger'] === 'listening';
     let moodLead: string[] | undefined;
+    let moodStarts = false;
+    let lane: Lane = 'interactive';
     if (listening) {
       const guard = this.listeningGuard(body, settings);
-      if (guard.skip) return ok({ job: null, reason: guard.reason });
+      if (guard.skip) return ok({ job: null, reason: guard.reason, ...(guard.resumes_at ? { resumes_at: guard.resumes_at } : {}) });
       seeds = guard.seeds;
       moodLead = guard.mood;
+      lane = guard.lane;
+    } else {
+      // MOOD-DEFAULT-001: an ordinary Discover run leads with songs that fit the current mood; the listener's own
+      // starting songs follow. No clear mood (or an explicit mood_queue opt-out) leaves the run as it was.
+      const mood = this.moodStartSeeds(settings);
+      if (mood) {
+        const keys = new Set(mood.seeds.map((t) => String(t['key'])));
+        seeds = [...mood.seeds, ...seeds.filter((s) => !keys.has(String(s['key'])))];
+        moodLead = mood.leading;
+        moodStarts = true;
+      }
     }
-    if (!seeds.length) return fail(400, 'Add at least one starting song first.');
+    // ARTIST-FAV-001: starred artists are starting points of their own, so they alone are enough to discover from.
+    // NEXT-FAV-COLD-001 (owner, 2026-11-23): "the find my new favorite button should work without a starting song
+    // and with no songs in queue. It should use the users listening algorithm, taste map, and favorite artist".
+    // With no starting song the run begins from the stars, the listening and the taste map instead; only a listener
+    // with none of the three has nothing to go on.
+    if (!seeds.length && !listening && !this.coldStarters().length) {
+      return fail(400, 'Nothing to go on yet. Play, like or star something \u2014 or add a starting song \u2014 and this finds music from it.');
+    }
+    if (!seeds.length && listening && !this.favArtists().length) return fail(400, 'Add at least one starting song first.');
     if (this.currentJob) this.jobs.get(this.currentJob)?.token.cancel('superseded by a newer request');
     const job = new Job(newId());
     this.jobs.set(job.id, job);
     this.currentJob = job.id;
     for (const [k, j] of this.jobs) if (j.done && unixNow() - j.started > 900) this.jobs.delete(k);
-    void this.runJob(job, seeds, settings, listening ? 'listening' : 'search');
+    void this.runJob(job, seeds, settings, listening ? 'listening' : 'search', lane, moodStarts);
     return ok(moodLead ? { job: job.id, mood: moodLead } : { job: job.id });
   }
 
@@ -1512,7 +1717,7 @@ export class LocalApi {
 
   private async runCustom(job: Job, crit: CustomCriteria, exclude: Set<string>, settings: Dict): Promise<void> {
     const p = this.pipeline;
-    const meter = p.meter(settings); job.meter = meter;
+    const meter = this.jobMeter(settings, 'interactive'); job.meter = meter;
     const c: Ctx = { token: job.token, meter };
     const lastAtStart = this.store.get<Dict>('last_result');
     try {
@@ -1547,6 +1752,10 @@ export class LocalApi {
         openArtist: async (t) => {
           const v = await this.artists.open({ ...(t.id ? { id: t.id } : {}), name: t.name }, c);
           return { name: v.name, songs: v.songs as unknown as CandidateTrack[], features: v.features as unknown as CandidateTrack[], similar: v.similar ?? [] };
+        },
+        everySong: async (t) => {
+          const v = await this.artists.open({ ...(t.id ? { id: t.id } : {}), name: t.name }, c);
+          return usable((await this.artists.everySong(v, c, { features: false })).songs as unknown as NativeTrack[]);
         },
         artistTop: async (name, id) => {
           const dz = id && /^dz:\d{1,15}$/.test(id) ? id.slice(3) : null;
@@ -1586,7 +1795,7 @@ export class LocalApi {
           rank: before.length + i + 1, track: cleanTrack(track), score: round(pk.score, 3), coverage: 1, tier: 'related', evidence: 'moderate',
           reasons: [{ factor: 'custom', weight: round(pk.score, 3), text: pk.reason }],
           uncertainty: [], new_release: false, factors: { custom: round(pk.score, 3) }, weights: { custom: 1 },
-          sources: [String(track['provider'])], playback: playbackFor(track), characteristics: characteristicsOf(track, taste), added: true, custom: true,
+          sources: [String(track['provider'])], playback: playbackFor(track), characteristics: characteristicsOf(track, taste), found: 'custom', custom: true,
         };
       });
       const next = this.withKnownGenres({ ...current, phase: 'final', items: [...before, ...items], count: before.length + items.length, saved_at: unixNow() });
@@ -1594,7 +1803,7 @@ export class LocalApi {
       if (items.length) await this.store.put('last_result', next);
       job.result = {
         added: items.length, asked: crit.count, candidates: res.candidates, missed: res.missed,
-        reason: customOutcome(items.length, crit.count, job.sources as Record<string, { state: string }>, res.missed),
+        reason: customOutcome(items.length, crit.count, job.sources as Record<string, { state: string }>, res.missed, { genres: crit.genres.length, artists: crit.artists.map((a) => a.name), queued: res.queued }),
         queue: items.length ? this.completed(next) : null, sources: job.sources,
       };
     } catch (e) { job.error = e instanceof Cancelled ? 'cancelled' : (e as Error).message || 'Custom discovery failed.'; }
@@ -1650,7 +1859,7 @@ export class LocalApi {
         : `${match}% calibrated sound match to “${seedTitle}” (DCLAP audio vectors).` }],
       uncertainty: [], new_release: false, factors: unmeasured ? {} : { audio: match / 100 }, weights: unmeasured ? {} : { audio: 1 },
       sources: [String(track['provider'])], playback: playbackFor(track as Dict), characteristics: characteristicsOf(track as Dict, null),
-      added: true, sound_match: unmeasured ? null : match, ...(below ? { sound_below: true } : {}), ...(unmeasured ? { sound_unmeasured: true } : {}),
+      found: 'similar', sound_match: unmeasured ? null : match, ...(below ? { sound_below: true } : {}), ...(unmeasured ? { sound_unmeasured: true } : {}),
     }));
     const next = this.withKnownGenres({ ...current, phase: 'final', items: [...previous, ...freshItems], count: previous.length + freshItems.length, saved_at: unixNow() });
     // A list replacement or cancellation in mid-search cannot be undone by this late completion.
@@ -1670,7 +1879,7 @@ export class LocalApi {
     const start = performance.now();
     const threshold = Number(settings['similar_percent']);
     const lastAtStart = this.store.get<Dict>('last_result');
-    const meter = p.meter(settings); job.meter = meter;
+    const meter = this.jobMeter(settings, 'interactive'); job.meter = meter;
     const c: Ctx = { token: job.token, meter };
     try {
       if (settings['audio'] === false) {
@@ -1764,7 +1973,7 @@ export class LocalApi {
    * came from the list counts, and only while the unplayed remainder is nearly gone; a skip, a
    * replay, a pause or a preview from search never starts a search. One listen starts one batch.
    */
-  private listeningGuard(body: Dict, settings: Dict): { skip: true; reason: string } | { skip: false; seeds: Dict[]; mood?: string[] } {
+  private listeningGuard(body: Dict, settings: Dict): { skip: true; reason: string; resumes_at?: number } | { skip: false; seeds: Dict[]; mood?: string[]; lane: Lane } {
     const seeds = this.store.seeds() as Dict[];
     const eventId = String(body['event_id'] ?? '');
     const event = this.store.feedback().find((f) => (f as unknown as Dict)['event_id'] === eventId) as unknown as Dict | undefined;
@@ -1783,7 +1992,10 @@ export class LocalApi {
       }
     }
     const items = (this.store.get<Dict>('last_result')?.['items'] ?? []) as { track: Dict }[];
-    const played = new Set<string>((Array.isArray(body['exclude']) ? body['exclude'] : []).map(String));
+    // QUEUE-HEARD-001 (owner, 2026-11-20): every song already heard counts, not only those the page played since it
+    // last opened (`exclude`). Songs finished or skipped in earlier sessions, or by the phone's engine while the
+    // page was closed, are on record; without them a queue heard over several days never looked low.
+    const played = new Set<string>([...(Array.isArray(body['exclude']) ? body['exclude'] : []).map(String), ...this.heardKeys()]);
     played.add(String(event['key']));
     // Played FROM the list, not merely present in it: a preview started from the search box carries
     // origin 'search' and must not spend anything on providers.
@@ -1794,14 +2006,25 @@ export class LocalApi {
     // MOOD-DISCOVER-001: a queue with songs left can still lack any that fit the listening mood; then the
     // mood's own songs seed a search (at most once every ten minutes, never for a saved list).
     const enabled = settings['discover_while_listening'] !== false;
-    const low = needsListeningDiscovery(enabled, String(event['kind'] ?? ''), inList, remaining);
-    const want = !low && !listId && enabled && inList && event['kind'] === 'complete' ? this.moodWantsMore(items, played, settings) : null;
+    const lowWater = needsListeningDiscovery(enabled, String(event['kind'] ?? ''), inList, remaining);
+    // AA-TOPUP-60-001 (owner, 2026-11-25): 60% of the queue's songs played for the first time tops it up too.
+    const share = !listId ? this.topUpShare(items, event, inList, enabled) : null;
+    const low = lowWater || share !== null;
+    const want = !lowWater && !listId && enabled && inList && event['kind'] === 'complete' ? this.moodWantsMore(items, played, settings) : null;
     if (!low && !want) return { skip: true, reason: 'The list does not need more songs yet.' };
     const active = this.currentJob ? this.jobs.get(this.currentJob) : null;
     if (active && !active.done) return { skip: true, reason: 'Discovery is already running.' };
+    // ALLOWANCE-ARCH-001: a top-up nobody asked for by hand waits for the reserve on mobile data, and says when it resumes.
+    // QUEUE-NEVER-DRY-001 (owner, 2026-11-22): "the discovery / now playing queue needs to keep finding new music, the
+    // user should never be able to fully listen to all the songs in now playing queue twice without anything new being
+    // found". A queue that is nearly all heard is what plays next, so its top-up is playback, which the allowance never
+    // limits; only the mood's optional top-up waits for the reserve.
+    const allowance = this.budget.state();
+    if (!low && allowance.paused) return { skip: true, reason: 'Finding new songs is paused to save mobile data.', ...(allowance.resumes_at ? { resumes_at: allowance.resumes_at } : {}) };
     const handled = (this.store.get<string[]>('discovery_events') ?? []) as string[];
     if (handled.includes(eventId)) return { skip: true, reason: 'Already discovered for this listen.' };
     void this.store.put('discovery_events', [...handled.slice(-99), eventId]);
+    if (share !== null) void this.store.put(TOPUP_HEARD_AT, share);
     // Follow what was actually heard as well as the original starting songs, without editing them:
     // the listener owns that list.
     const heard = (event['track'] ?? null) as Dict | null;
@@ -1809,9 +2032,26 @@ export class LocalApi {
       void this.store.put(MOOD_DISCOVERY_AT, unixNow());
       const first = [...want.seeds, ...(heard ? [heard] : [])];
       const firstKeys = new Set(first.map((t) => String(t['key'])));
-      return { skip: false, seeds: [...first.filter((t, i) => first.findIndex((u) => u['key'] === t['key']) === i), ...seeds.filter((s) => !firstKeys.has(String(s['key'])))], mood: want.leading };
+      return { skip: false, seeds: [...first.filter((t, i) => first.findIndex((u) => u['key'] === t['key']) === i), ...seeds.filter((s) => !firstKeys.has(String(s['key'])))], mood: want.leading, lane: 'background' };
     }
-    return { skip: false, seeds: heard ? [heard, ...seeds.filter((s) => s['key'] !== event['key'])] : seeds };
+    return { skip: false, seeds: heard ? [heard, ...seeds.filter((s) => s['key'] !== event['key'])] : seeds, lane: 'playback' };
+  }
+
+  /**
+   * AA-TOPUP-60-001: the number of distinct queue songs played for the first time (a complete or partial play; a skip
+   * is not a first play) when that reaches 60% of the queue and has moved past the last top-up's count. Null otherwise.
+   * A top-up that adds nothing waits for the next new first play, so it cannot repeat on replays.
+   */
+  private topUpShare(items: { track: Dict }[], event: Dict, inList: boolean, enabled: boolean): number | null {
+    if (!enabled || !inList) return null;
+    const kind = String(event['kind'] ?? '');
+    if (kind !== 'complete' && kind !== 'partial') return null;
+    const queue = new Set(items.map((x) => String(x?.track?.['key'] ?? '')).filter(Boolean));
+    if (!queue.size) return null;
+    const firstPlayed = new Set(this.store.feedback().filter((r) => (r.kind === 'complete' || r.kind === 'partial') && queue.has(r.key)).map((r) => r.key));
+    const heard = firstPlayed.size;
+    const askedAt = Number(this.store.get(TOPUP_HEARD_AT) ?? 0);
+    return heard > askedAt && heard * 100 >= queue.size * 60 ? heard : null;
   }
 
   /**
@@ -1827,10 +2067,15 @@ export class LocalApi {
     if (mood.confidence < 0.5) return null;
     const left = items.filter((x) => x?.track?.['key'] && !played.has(String(x.track['key'])));
     const { fit } = moodFit(left.map((x) => ({ key: String(x.track['key']), tags: tagsOf(x.track), vector: this.moodVector(x.track) })), mood);
-    const a = Number(settings['adventurous'] ?? 0.5);
+    const a = Number(settings['adventurous'] ?? 1.0);
     const bar = 0.65 - 0.3 * Math.max(0, Math.min(1, Number.isFinite(a) ? a : 0.5));
     if (left.filter((x) => (fit[String(x.track['key'])] ?? 0) >= bar).length >= MOOD.lead) return null;
-    // The songs the mood rests on: starred, Find similar, finished and replayed, newest first.
+    const seeds = this.moodSeedRows(now);
+    return seeds.length ? { seeds, leading: mood.leading } : null;
+  }
+
+  /** The songs the mood rests on: starred, Find similar, finished and replayed, newest first (at most 3). */
+  private moodSeedRows(now: number): Dict[] {
     const strong = new Set(['like', 'save', 'similar', 'complete', 'replay']);
     const seeds: Dict[] = [];
     const rows = [
@@ -1841,6 +2086,21 @@ export class LocalApi {
       if (seeds.length >= 3) break;
       if (!seeds.some((t) => t['key'] === r.track['key'])) seeds.push(r.track);
     }
+    return seeds;
+  }
+
+  /**
+   * MOOD-DEFAULT-001 (owner, 2026-11-25): an ordinary Discover run starts from the listener's current mood. Returns
+   * the mood's songs to start from, or null when mood-based listening is off (an explicit opt-out) or the mood is
+   * not yet clear (confidence below 0.5, or no mood songs to go on).
+   */
+  private moodStartSeeds(settings: Dict): { seeds: Dict[]; leading: string[] } | null {
+    if (settings['mood_queue'] === false) return null;
+    const now = unixNow();
+    const tagsOf = (t: Dict) => moodTags(characteristicsOf(t, null) as never);
+    const mood = buildMood(this.moodSignals(now, tagsOf), now);
+    if (mood.confidence < 0.5) return null;
+    const seeds = this.moodSeedRows(now);
     return seeds.length ? { seeds, leading: mood.leading } : null;
   }
 
@@ -1880,25 +2140,47 @@ export class LocalApi {
     };
   }
 
-  private async runJob(job: Job, seeds: Dict[], settings: Dict, trigger: 'search' | 'listening' = 'search'): Promise<void> {
+  private async runJob(job: Job, seeds: Dict[], settings: Dict, trigger: 'search' | 'listening' = 'search', lane: Lane = trigger === 'listening' ? 'background' : 'interactive', moodStarts = false): Promise<void> {
     const p = this.pipeline;
     const t0 = performance.now();
     const since = () => Math.round(performance.now() - t0);
     // The list as it stands. A batch adds to it; lowering the limit never shortens it.
     const previous = (this.store.get<Dict>('last_result')?.['items'] ?? []) as { track: Dict }[];
     const held = [...(this.store.seeds() as Dict[]), ...previous.map((x) => x.track)];
+    // ARTIST-VARIETY-001: the songs by each artist already waiting in the queue, and in the last few listens, count
+    // against the per-artist cap, so batch after batch cannot pile one artist up.
+    const listens = this.store.feedback().filter((r) => r.kind === 'complete' || r.kind === 'skip');
+    // WP4 (A5): the load is the songs waiting PLUS the artists of the last RECENT_LISTENS listens (newest last).
+    const waiting = artistLoad(previous, new Set(listens.map((r) => r.key)));
+    const load = withRecentListens(waiting, [...listens].sort((a, b) => a.ts - b.ts));
+    // WP4 (A5) never-dry escape (QUEUE-NEVER-DRY-001): a batch that would come back with fewer than NEVER_DRY_MIN songs
+    // is chosen again without the recent listens. select() itself is unchanged.
+    const choose = (sc: Parameters<typeof E.select>[0], c: E.Context) => selectNeverDry((l) => E.select(sc, { ...c, artistLoad: l }), load, waiting);
     const limit = Number(settings['queue_size'] ?? DEFAULT_ENGINE.queueSize);
     const merge = (batch: Dict): Dict => {
       // QUEUE-ADD-001: append to the queue as it stands now, so a song the listener added while this
       // batch was being found is kept rather than overwritten by the queue as it was at the start.
       const now = (this.store.get<Dict>('last_result')?.['items'] ?? previous) as { track: Dict }[];
       const items = appendDiscovery(now, (batch['items'] ?? []) as { track: Dict }[], limit);
-      return { ...batch, items, count: items.length, discovery: { added: items.length - now.length, limit, trigger } };
+      // NEXT-FAV-COLD-001: a run with no starting song says which of the three it read.
+      const from = coldReason(coldUsed);
+      return { ...batch, items, count: items.length, ...(from ? { started_from: from } : {}), discovery: { added: items.length - now.length, limit, trigger } };
     };
+    /** NEXT-FAV-COLD-001: filled in below once the seedless run knows its starting artists. */
+    let coldUsed: ColdStarter[] = [];
+    // QUEUE-DATA-FLOW-001: a top-up never offers a song the listener has already finished or skipped.
+    // WP8 / D1: a manual run ('search') leaves out songs still resting (30 days, starred 14); a top-up never re-offers a heard song.
+    const heardBefore = discoveryHeardTest(trigger, this.store.feedback() as never, unixNow());
+    const unheard = (t: Dict): boolean => !heardBefore || !heardBefore(t);
     try {
       const cfg = { ...engineFromSettings(settings), queueSize: Number(settings['queue_size'] ?? DEFAULT_ENGINE.queueSize) };
       const es = E.normaliseSettings({ fresh: Boolean(settings['fresh']), adventurous: settings['adventurous'] });
-      job.meter = p.meter(settings);
+      // QUEUE-DATA-FLOW-001: a top-up while listening is never refused for the allowance when the queue is running
+      // dry, so on mobile data each one is held to a small ceiling instead (Budget.topUpCap).
+      const topUp = trigger === 'listening';
+      job.meter = topUp
+        ? this.budget.meter(lane, this.budget.topUpCap(Math.trunc(Number(settings['request_mb'] ?? TRANSFER.perRequest / 1e6) * 1e6)))
+        : this.jobMeter(settings, lane);
       job.phase = 'profiling';
       job.progress = 'Looking up your starting songs';
       // PLAYLIST-QUEUE-001: a long list of starting songs (a saved list sent to the queue) is asked
@@ -1914,8 +2196,39 @@ export class LocalApi {
         if (asked.has(String(sd['key']))) continue;
         profiles[sd['key']] = (this.store.cacheGet(`seedprofile:${sd['id']}`, true)?.value as Dict | undefined) ?? { dz: null, ytm_vid: null, dz_uncertain: [] };
       }
-      const seedViews = seeds.map((sd) => p.seedView(sd, profiles[sd['key']] as Dict));
-      const gatherViews = seedViews.filter((sv) => asked.has(String(sv['key'])));
+      // ARTIST-FAV-001: the newest starred artists join as starting points of their own (their radio, top songs and
+      // related artists), on every Find my next favorite run with no Customize options needed.
+      // NEXT-FAV-COLD-001: with no starting song the run's starting points are the listener's stars, the artists
+      // their listening says they like, and their taste map's colours — in that order, run-only.
+      // MOOD-DEFAULT-001: mood seeds lead an ordinary Discover run; the listening/taste starters still feed it.
+      const cold = topUp || (seeds.length > 0 && !moodStarts) ? [] : this.coldStarters(FAV_PER_RUN);
+      coldUsed = cold;
+      const asFav = (cs: ColdStarter): FavArtist => this.favArtists().find((f) => fold(f.name) === fold(cs.name)) ?? { name: cs.name, deezerId: null, fans: null, picture: null, pageId: null, addedAt: 0 };
+      // QUEUE-DATA-FLOW-001 (owner, 2026-11-23): "the discovery engine doesnt continously find new songs ... you
+      // repeat the same songs". A top-up used to ask only the starting songs, so once their sources were spent every
+      // run came back with what the queue already held. Each top-up now also asks a few of the listener's own
+      // artists — starred, then learned from listening, then their sound's — carrying on where the last one stopped.
+      const flow = flowState(this.store.get(FLOW_KEY));
+      const seedArtists = new Set(win.window.map((sd) => fold(String((sd['artists'] as string[] | undefined)?.[0] ?? sd['artist'] ?? ''))));
+      const flowPool = topUp ? this.coldStarters(FLOW_POOL).filter((cs) => !seedArtists.has(fold(cs.name))) : [];
+      const walk = flowPick(flowPool, flow);
+      const settleFlow = async (added: number) => {
+        if (topUp) await this.store.put(FLOW_KEY, { cursor: walk.next, dry: added > 0 ? 0 : flow.dry + 1 });
+      };
+      const favs = topUp
+        ? walk.picked.map(asFav)
+        : cold.length
+          ? cold.map(asFav)
+          : this.favArtists().slice(0, FAV_PER_RUN);
+      job.timings['cold_start'] = cold.length;
+      if (cold.length) job.progress = 'Reading your listening and your sound';
+      const favParts = await this.favSeeds(job, favs);
+      for (const f of favParts) profiles[String(f.seed['key'])] = f.profile;
+      const seedViews = [...seeds.map((sd) => p.seedView(sd, profiles[sd['key']] as Dict)), ...favParts.map((f) => f.seed)];
+      const gatherViews = seedViews.filter((sv) => asked.has(String(sv['key'])) || sv['fav_artist'] === true);
+      // ARTIST-SIZE-001: the size the list aims for, from the starting and starred artists' Deezer followers.
+      const sizeRef = await this.sizeReference(job, seedViews, profiles, favs);
+      job.timings['size_ref'] = sizeRef ?? 0;
       job.timings['seeds'] = seeds.length;
       job.timings['seeds_asked'] = gatherViews.length;
       job.timings['profile_ms'] = since();
@@ -1923,6 +2236,8 @@ export class LocalApi {
       job.progress = 'Asking the music services for related songs';
       // Feedback and impressions are ready before gathering so the first wave can be scored honestly.
       const fb = settings['rank_v2'] !== false ? E.withSavedAlbums(E.buildFeedback2(this.store.feedback() as never, unixNow(), cfg), this.savedAlbumKeys()) : E.buildFeedback(this.store.feedback() as never, unixNow(), cfg);
+      // DISCOVER-BREADTH-001: a share of every batch is kept for new artists who fit the mood.
+      const breadth = breadthFor(seedViews as never, fb, es.adventurous);
       const imps = this.store.impressions(unixNow() - cfg.exposureWindowDays * 86400);
       const v2 = settings['rank_v2'] !== false;
       const taste = this.taste();
@@ -1936,9 +2251,9 @@ export class LocalApi {
           const relMapQ = new Map([...relPartial].filter(([, v]) => v.size));
           const ctxQ: E.Context = {
             seeds: seedViews as never, vectors: new Map(), relatedArtists: relMapQ, feedback: fb, impressions: imps,
-            settings: es2, now: new Date(), cfg, taste, rankV2: v2, taste2,
+            settings: es2, now: new Date(), cfg, taste, rankV2: v2, taste2, artistLoad: load, breadth, moodGate: true,
           };
-          const quickChosen = E.select(E.scoreAll(newDiscoveryTracks(quick, held) as never, ctxQ), ctxQ);
+          const quickChosen = choose(E.scoreAll(newDiscoveryTracks(quick, held).filter(unheard) as never, ctxQ), ctxQ);
           if (quickChosen.length) {
             job.result = merge(this.serialise(quickChosen, ctxQ, 'gathering', job));
             job.progress = `First ${quickChosen.length} songs found; still asking the other services`;
@@ -1956,21 +2271,32 @@ export class LocalApi {
       const colours = this.colourList(taste);
       if (colours.length) await this.store.put(TASTE_CURSOR_KEY, colourCursor + 1);
       job.timings['taste_colours'] = colours.length;
-      const gathered = await p.gather(job, gatherViews, profiles, cfg, es.fresh, onPartial, deepAlbums, { colours, cursor: colourCursor });
+      const gathered = await p.gather(job, gatherViews, profiles, cfg, es.fresh, onPartial, deepAlbums, { colours, cursor: colourCursor }, { skipCharts: smallScene(sizeRef), cheapFirst: topUp && !this.budget.unmetered });
       const related = gathered.related;
-      // Only songs the list does not already hold can take a slot in this batch.
-      const cands = newDiscoveryTracks(gathered.cands, held);
+      // Only songs the list does not already hold can take a slot in this batch — and, for a top-up, only songs
+      // the listener has not already heard (QUEUE-DATA-FLOW-001: a heard song must never come back as new).
+      const cands = newDiscoveryTracks(gathered.cands, held).filter(unheard);
       job.timings['gather_ms'] = since() - job.timings['profile_ms'];
       job.timings['candidates'] = cands.length;
       if (!cands.length) {
+        await settleFlow(0);
         job.result = merge({
           phase: 'final', items: [], count: 0, asked: cfg.queueSize, sources: job.sources, audio: job.audio, timings: job.timings,
           transfer: { ...job.meter.counts },
-          empty_reason: previous.length
+          // QUEUE-DATA-FLOW-001: a top-up that found nothing new says what it asked and what the next one asks.
+          empty_reason: topUp
+            ? dryReason(
+              { seeds: win.window.filter((sd) => seeds.some((s0) => s0['key'] === sd['key'])).length, artists: walk.picked.map((x) => x.name), colours: colours.length },
+              flowPick(flowPool, { cursor: walk.next, dry: flow.dry + 1 }).picked.map((x) => x.name).filter((nm) => !walk.picked.some((x) => x.name === nm)),
+            )
+            : previous.length
             ? colours.length
               ? 'No new songs this time. Your list is unchanged; the next run reads further into your sound.'
               : 'No new songs this time. Your list is unchanged. Finish or like a few songs and your sound starts finding more on its own.'
-            : 'No service returned related songs for these starting songs.',
+            : coldUsed.length
+              // NEXT-FAV-COLD-001: a seedless run names what it read rather than blaming starting songs there are none of.
+              ? `No service returned songs for ${coldUsed.slice(0, 3).map((x) => x.name).join(', ')}. Try again, or add a starting song.`
+              : 'No service returned related songs for these starting songs.',
         });
         return;
       }
@@ -1986,9 +2312,16 @@ export class LocalApi {
         if (v) vectors.set(sv['key'], Float64Array.from(v));
       }
       const relMap = new Map([...related].filter(([, v]) => v.size));
-      const ctx: E.Context = { seeds: seedViews as never, vectors, relatedArtists: relMap, feedback: fb, impressions: imps, settings: es, now: new Date(), cfg, taste, rankV2: v2, taste2 };
+      const ctx: E.Context = { seeds: seedViews as never, vectors, relatedArtists: relMap, feedback: fb, impressions: imps, settings: es, now: new Date(), cfg, taste, rankV2: v2, taste2, artistLoad: load, breadth, moodGate: true };
       let scored = E.scoreAll(cands as never, ctx);
-      let chosen = E.select(scored, ctx);
+      let chosen = choose(scored, ctx);
+      // ARTIST-SIZE-001: the leading songs' artists are sized and the list is ranked again with their fit.
+      if (sizeRef !== null) {
+        job.progress = 'Matching artists of a similar size';
+        // DISCOVER-BREADTH-002: the sample reaches past the top 60 so breadth picks get a real size reading.
+        const fit = await this.sizeFitFor(job, sizeRef, scored.slice(0, 120).map((x) => x.track as Dict));
+        if (fit) { ctx.artistFit = fit; scored = E.scoreAll(cands as never, ctx); chosen = choose(scored, ctx); }
+      }
       job.timings['metadata_ms'] = since();
       job.result = merge(this.serialise(chosen, ctx, 'metadata', job));
 
@@ -2098,22 +2431,32 @@ export class LocalApi {
       // asked for subgenres, so it was skipped. Ask again now that every song has its family.
       job.progress = 'Naming hip-hop subgenres';
       scored = E.scoreAll(cands as never, ctx);
-      chosen = E.select(scored, ctx);
+      chosen = choose(scored, ctx);
       // Ask about the songs the person will see, in ranked order, not the raw gathering order.
       const byKey = new Map(cands.map((c) => [String(c['key']), c]));
       const shown = chosen.map((x) => byKey.get(x.track.key)).filter((c): c is Dict => Boolean(c));
       await p.subgenresFromMusicBrainz(job, shown, 12);
       scored = E.scoreAll(cands as never, ctx);
-      chosen = E.select(scored, ctx);
+      chosen = choose(scored, ctx);
       job.timings['total_ms'] = since();
       job.result = merge(this.serialise(chosen, ctx, 'final', job));
       // The pool keeps every song the list holds, so a later re-rank can reorder all of them.
-      const poolCands = [...previous.map((x) => x.track), ...cands];
-      this.pool = { cands: poolCands, ctx, job };
+      // WP2 (plan 2026-11-24, A2): a carried row keeps its raw candidate (provenance, dz_id, links) from the old pool,
+      // related artists and seeds are unioned across runs, and the best non-chosen rows wait on a separate bench.
+      const oldPool = this.pool ?? this.restorePool();
+      const oldSaved = this.store.get<Dict>('last_pool');
+      const oldRows = [...(oldPool?.cands ?? []), ...(((oldSaved?.['bench'] as Dict[] | undefined) ?? []))];
+      const rankedKeys = [...scored].sort((a, b) => b.final - a.final).map((x) => x.track.key);
+      const carried = carryPool(previous as never, oldRows, chosen.map((x) => x.track.key), cands, rankedKeys, 100);
+      const poolRelated = unionRelated(relMap, oldPool?.ctx.relatedArtists ?? null);
+      const poolSeeds = unionSeeds(seedViews as Dict[], (oldPool?.ctx.seeds as unknown as Dict[] | undefined) ?? null, 40);
+      const poolCands = carried.cands;
+      this.pool = { cands: poolCands, ctx: { ...ctx, seeds: poolSeeds as never, relatedArtists: poolRelated }, job };
       await this.store.put('last_pool', {
-        cands: poolCands, seeds: seedViews, related: [...relMap].map(([k, v]) => [k, [...v]]), settings: es, weights: settings['weights'] ?? null,
+        cands: poolCands, bench: carried.bench, seeds: poolSeeds, related: [...poolRelated].map(([k, v]) => [k, [...v]]), settings: es, weights: settings['weights'] ?? null,
       });
       await this.store.put('last_result', { ...job.result, saved_at: unixNow() });
+      await settleFlow(Number(((job.result as Dict | null)?.['discovery'] as Dict | undefined)?.['added'] ?? 0));
     } catch (e) {
       job.error = e instanceof Cancelled ? 'cancelled' : `${(e as Error).name}: ${(e as Error).message}`;
     } finally {
@@ -2138,8 +2481,20 @@ export class LocalApi {
     const v2 = settings['rank_v2'] !== false;
     // Re-ranking reorders the songs the list already holds and adds nothing, so the discovery limit
     // must not trim it here: a smaller limit would otherwise drop songs the listener still has.
+    // WP2 step 3: a vector made since the run (a song played to the end, a preview compared) counts in this re-rank.
+    const vectors = new Map(pool.ctx.vectors);
+    for (const sv of [...(pool.ctx.seeds as unknown as Dict[]), ...pool.cands]) {
+      const k = String(sv['key'] ?? '');
+      if (!k || vectors.has(k)) continue;
+      const did = sv['dz_preview_id'] || sv['dz_id'] || (sv['provider'] === 'deezer' ? sv['platform_id'] : null);
+      const v = this.store.vectorGet(songVectorKey(k), A.MODEL_ID, A.PREPROCESS_ID) ?? (did ? this.store.vectorGet(`deezer:${did}`, A.MODEL_ID, A.PREPROCESS_ID) : null);
+      if (v) vectors.set(k, Float64Array.from(v));
+    }
     const ctx: E.Context = {
       ...pool.ctx,
+      vectors,
+      // ARTIST-VARIETY-001: the pool's own songs are the queue; counting them as already waiting would cap them out.
+      artistLoad: undefined,
       // ALGO-MANAGER-001: the algorithm active NOW ranks the pool, over the run's own engine base.
       cfg: { ...engineFromSettings(settings, cfg), queueSize: Math.max(pool.cands.length, 1) },
       feedback: v2 ? E.withSavedAlbums(E.buildFeedback2(this.store.feedback() as never, unixNow(), cfg), this.savedAlbumKeys()) : E.buildFeedback(this.store.feedback() as never, unixNow(), cfg),
@@ -2149,8 +2504,19 @@ export class LocalApi {
       taste2: v2 ? this.taste2() : null,
       now: new Date(),
     };
-    const cands = pool.cands.filter((c) => !exclude.has(String(c['key'])));
-    const chosen = E.select(E.scoreAll(cands as never, ctx), ctx);
+    // WP1 (plan 2026-11-24, A1/A4): a re-rank orders only the songs the queue holds now. Pool rows that were never
+    // chosen stay out, and every queued row comes back (orderAll has no artist cap or tier quota; WP4/M3 only spaces artists). Queue rows with no
+    // pool row are not returned; the page's mergeRerank keeps them where they are (SHUFFLE-STAY-001).
+    const stored = this.store.get<Dict>('last_result');
+    // WP1 step 4 (A8): found rows (Find similar, custom discovery; old stored rows marked added + custom/sound_match)
+    // are movable but never re-scored, so they are not candidates here; mergeRerank keeps them in place.
+    const isFound = (it: Dict) => Boolean(it['found']) || Boolean(it['custom']) || 'sound_match' in it;
+    const queued = new Set(((stored?.['items'] ?? []) as Dict[]).filter((it) => !isFound(it)).map((it) => String((it['track'] as Dict | undefined)?.['key'] ?? '')));
+    queued.delete('');
+    // No stored queue at all (an old install, or a pool restored on its own): rank the pool; the page still ignores rows
+    // it never queued. A stored queue that is empty ranks nothing.
+    const cands = pool.cands.filter((c) => (!stored || queued.has(String(c['key']))) && !exclude.has(String(c['key'])));
+    const chosen = E.orderAll(E.scoreAll(cands as never, ctx), ctx);
     const out = this.serialise(chosen, ctx, 'live', pool.job) as Dict;
     out['taste'] = tasteSummary(ctx.taste);
     out['pool'] = pool.cands.length;
@@ -2168,6 +2534,10 @@ export class LocalApi {
   }
 
   private moodLogNow: Dict[] | null = null;
+  /** WP6 (M1): the keys the mood moved in its recent plans, newest last (at most MOOD.movedKeep = 64). */
+  private moodMoved: string[] = [];
+  /** For tests: the moved keys the finished-song discount reads. */
+  moodMovedForTest(): string[] { return [...this.moodMoved]; }
   private moodLog(): Dict[] { return [...(this.moodLogNow ?? this.store.get<Dict[]>('mood_log') ?? [])]; }
 
   /**
@@ -2233,15 +2603,28 @@ export class LocalApi {
     const signals = this.moodSignals(now, tagsOf);
     const cur = body['current'] as Dict | undefined;
     const curTrack = cur?.['track'] as Dict | undefined;
-    if (curTrack?.['key']) signals.push({ key: String(curTrack['key']), kind: 'current', ts: now, tags: tagsOf(curTrack, cur?.['characteristics'] as Dict | undefined), vector: this.moodVector(curTrack) });
-    const mood = buildMood(signals, now);
+    // WP6 (M2, D2): the page sends the seconds of the song playing heard so far (`current.heard`); v2 ramps on it.
+    const heard = Number(cur?.['heard']);
+    if (curTrack?.['key']) signals.push({ key: String(curTrack['key']), kind: 'current', ts: now, tags: tagsOf(curTrack, cur?.['characteristics'] as Dict | undefined), vector: this.moodVector(curTrack), listened: Number.isFinite(heard) ? heard : 0 });
+    // WP6 (setting mood_plan, default 'v2'): 'v1' is the old order, one switch away.
+    const version: MoodPlanVersion = settings['mood_plan'] === 'v1' ? 'v1' : 'v2';
+    const mood = buildMood(signals, now, { plan: version, moved: new Set(this.moodMoved) });
     const cands: MoodCandidate[] = list.map((u) => {
       const t = u['track'] as Dict;
-      return { key: String(t['key']), tags: tagsOf(t, u['characteristics'] as Dict | undefined), vector: this.moodVector(t) };
+      const score = Number(u['score']);
+      const artists = t['artists'];
+      const artist = Array.isArray(artists) && artists.length ? String(artists[0]) : typeof t['artist'] === 'string' ? (t['artist'] as string) : '';
+      return { key: String(t['key']), tags: tagsOf(t, u['characteristics'] as Dict | undefined), vector: this.moodVector(t), artist, score: u['score'] != null && Number.isFinite(score) ? score : null };
     });
     const shown = Array.isArray(body['shown']) ? (body['shown'] as unknown[]).map(String).slice(0, 500) : undefined;
-    const adventurous = Number(settings['adventurous'] ?? 0.5);
-    const plan = moodOrder(cands, mood, Number.isFinite(adventurous) ? adventurous : 0.5, { shown });
+    const adventurous = Number(settings['adventurous'] ?? 1.0);
+    // 0.20.19: mood lead first, then the run cap from row 13 on (see mood-queue.ts moodOrderV2).
+    const lead = settings['mood_lead'] !== false;
+    const rl = Number(settings['genre_run_limit']);
+    const runLimit = Number.isFinite(rl) ? rl : 8;
+    const plan = moodOrder(cands, mood, Number.isFinite(adventurous) ? adventurous : 1.0, { shown, version, lead, runLimit });
+    // WP6 (M1): a finished song the mood moved in a recent plan counts 1 instead of 2.
+    if (plan.changed) this.moodMoved = [...this.moodMoved.filter((k) => !plan.moved.includes(k)), ...plan.moved].slice(-MOOD.movedKeep);
     // MOOD-SHUFFLE-001: how well each song fits, for the shuffle's weighted pick. `score` adds songs that
     // may not move (hand-added, or a list played in shuffle) but are still picked from.
     const extra = (Array.isArray(body['score']) ? (body['score'] as Dict[]) : []).slice(0, 500)
@@ -2312,14 +2695,18 @@ export class LocalApi {
     const eventId = String(body['event_id'] ?? '').slice(0, 80);
     if (!eventId) return fail(400, 'event_id required (used to deduplicate)');
     const listened = body['listened'] ?? null;
-    if (['complete', 'skip', 'replay'].includes(kind) && (listened === null || !(Number(listened) >= 0 && Number(listened) <= 3600))) return fail(400, 'playback events need the listened duration');
+    if (['complete', 'skip', 'partial', 'replay'].includes(kind) && (listened === null || !(Number(listened) >= 0 && Number(listened) <= 3600))) return fail(400, 'playback events need the listened duration');
     // RADIO-TASTE-001: a radio programme is not a song; whatever reports it, nothing is learned from it.
     if (t['kind'] === 'radio-programme' && FEEDBACK_KINDS.has(kind)) return ok({ recorded: false, duplicate: false });
     const onRadio = body['medium'] === 'radio';
     // The phone page and the service page can both follow one station. Once the full listen is
     // stored, a late thirty-second note for the same listen is the same listen, not a second one.
     if (onRadio && kind === 'qualified' && this.store.hasFeedback(`${eventId}:full`.slice(0, 80))) return ok({ recorded: false, duplicate: true });
-    if (kind === 'like') this.store.removeFeedback(key, ['dislike']);
+    // REMOVE-FOREVER-001: a like or a star (save) takes back an earlier removal, so the song may come back.
+    const takenBack = kind === 'like' ? this.store.removeFeedback(key, ['dislike', 'hide']) : kind === 'save' ? this.store.removeFeedback(key, ['hide']) : 0;
+    // REMOVE-FOREVER-001 + WP1: taking a removal back is an explicit membership change, so the song returns to the
+    // saved queue here (a re-rank itself only reorders the queue and never adds a song).
+    if (takenBack > 0) await this.restoreRemoved(String(key));
     if (kind === 'dislike') this.store.removeFeedback(key, ['like']);
     const artist = (t['artists'] as string[] | undefined)?.[0]?.toLowerCase() ?? '';
     // v2 telemetry: optional, validated, stored alongside the event (old callers simply omit it).
@@ -2348,7 +2735,26 @@ export class LocalApi {
     }
     const stored = t['album'] ? cleanTrack(t) : cleanTrack(withAlbumOf(t, this.knownTracks().get(String(key))));
     const added = await this.store.addFeedback(eventId, key, kind, artist, stored, listened === null ? null : Number(listened), heardAt, hasMeta ? meta : undefined);
+    // REMOVE-FOREVER-001: a removed song leaves the saved queue too, so it is not there after a restart.
+    if (kind === 'hide' || kind === 'dislike') {
+      const last = this.store.get<Dict>('last_result');
+      const items = (last?.['items'] ?? []) as Dict[];
+      const rest = items.filter((x) => String((x['track'] as Dict | undefined)?.['key']) !== String(key));
+      if (last && rest.length !== items.length) await this.store.put('last_result', { ...last, items: rest.map((x, i) => ({ ...x, rank: i + 1 })), count: rest.length });
+    }
     return ok({ recorded: added, duplicate: !added });
+  }
+
+  /** Put a song whose removal was taken back into the saved queue again, from the pool, at the end. */
+  private async restoreRemoved(key: string): Promise<void> {
+    const last = this.store.get<Dict>('last_result');
+    if (!last) return;
+    const items = (last['items'] ?? []) as Dict[];
+    if (items.some((x) => String((x['track'] as Dict | undefined)?.['key']) === key)) return;
+    const cand = (this.pool ?? this.restorePool())?.cands.find((c) => String(c['key']) === key);
+    if (!cand) return;
+    const rest = [...items, { track: cleanTrack(cand as never), rank: items.length + 1, reasons: [], playback: playbackFor(cand as never) }];
+    await this.store.put('last_result', { ...last, items: rest, count: rest.length });
   }
 
   /** Import a parsed history file: pre-validated events from engine/import.ts, original timestamps kept. */
@@ -2394,6 +2800,21 @@ export class LocalApi {
   }
 
   /** The listening taste as of now, from every stored playback and feedback event. */
+  /**
+   * NEXT-FAV-COLD-001: the artists a Find my next favorite with no starting song begins from — the listener's
+   * starred artists, then the artists their listening says they like, then their taste map's colours. Run-only:
+   * nothing here is written into the starting songs or the starred list.
+   */
+  private coldStarters(want = FAV_PER_RUN): ColdStarter[] {
+    return coldStarters({
+      starred: this.favArtists().map((a) => a.name),
+      rows: this.historyRows().map((r) => ({ kind: r.kind, ts: r.ts, track: (r.track as Dict | null) ?? null })),
+      colours: this.colourList(this.taste()),
+      now: unixNow(),
+      cursor: Math.max(0, Math.trunc(Number(this.store.get(TASTE_CURSOR_KEY) ?? 0))),
+    }, want);
+  }
+
   /** The colours the Sound card draws, as the gather step wants them (COLOR-DISCOVERY-001). */
   private colourList(taste: TasteProfile): Colour[] {
     const sum = tasteSummary(taste);
@@ -2516,7 +2937,7 @@ export class LocalApi {
         this.genreQueue.delete(key);
         if (this.store.cacheGet(`genretry:${key}`)?.value) continue;
         try {
-          const { tags } = await this.lookUpGenres(t, this.searchMeter());
+          const { tags } = await this.lookUpGenres(t, this.backgroundMeter());
           if (tags.length) await this.store.put(SAVED_TAGS_KEY, { ...(this.store.get<Record<string, Tag[]>>(SAVED_TAGS_KEY) ?? {}), [key]: tags });
           await this.store.cachePut(`genretry:${key}`, 'metadata', true, 24 * 3600);
         } catch (e) {
@@ -2571,14 +2992,14 @@ export class LocalApi {
       const mark = unplaced ? `genretry:${key}` : artistAsk ? `substry:${key}` : `yeartry:${key}`;
       try {
         if (unplaced) {
-          const { tags } = await this.lookUpGenres(next, this.searchMeter());
+          const { tags } = await this.lookUpGenres(next, this.backgroundMeter());
           if (tags.length) await this.store.put(SAVED_TAGS_KEY, { ...(this.store.get<Record<string, Tag[]>>(SAVED_TAGS_KEY) ?? {}), [key]: tags });
         } else if (artistAsk) {
           // A main genre and no subgenre: what MusicBrainz's listeners call the artist (GENRE-ALL-001).
-          await this.askArtist(next, this.searchMeter());
+          await this.askArtist(next, this.backgroundMeter());
         } else {
           // Still nothing finer: the year the song came out (Deezer), so its era names the subgenre.
-          const dated = LocalApi.dated(next, await this.deezerFacts(next, { meter: this.searchMeter() }));
+          const dated = LocalApi.dated(next, await this.deezerFacts(next, { meter: this.backgroundMeter() }));
           const date = dated['release'] ? { release: dated['release'] } : typeof dated['year_hint'] === 'number' ? { year_hint: dated['year_hint'] } : null;
           if (date) await this.store.put(SAVED_DATES_KEY, { ...(this.store.get<Record<string, Dict>>(SAVED_DATES_KEY) ?? {}), [key]: date });
         }
@@ -2633,6 +3054,12 @@ export class LocalApi {
   }
 
   /** Every song the listener has actually finished, which is what gates a list's own discovery. */
+  /** QUEUE-HEARD-001: songs the listener has heard at least once: finished or skipped, in any session. */
+  private heardKeys(): Set<string> {
+    // WP3: a partial listen (Next pressed mid-song) is heard too.
+    return new Set(this.store.feedback().filter((r) => r.kind === 'complete' || r.kind === 'skip' || r.kind === 'partial').map((r) => r.key));
+  }
+
   private playedKeys(): Set<string> {
     return new Set(this.store.feedback().filter((r) => r.kind === 'complete').map((r) => r.key));
   }
@@ -2641,7 +3068,21 @@ export class LocalApi {
    * The lists, each with the songs it holds resolved back to tracks. A song whose track was never
    * recorded still counts towards the list's length, so the discovery gate cannot be fooled by it.
    */
-  private playlists(): Dict {
+  /** PLAYLIST-DELTA-001: the lists as last worked out, good until anything kept in the store changes. */
+  private listsMemo: { at: number; made: number; lists: (Dict & { id: string; items: unknown[] })[] } | null = null;
+
+  private playlists(held: Held | null = null): Dict {
+    // Reading a large library takes several calls (playlist-delta.ts); they must not each work all of it out again.
+    // A minute at most: a look-up that is due to be tried again changes the answer without changing the store.
+    const at = this.store.version;
+    const made = unixNow();
+    if (this.listsMemo?.at === at && made - this.listsMemo.made < 60) return { lists: shapeLists(this.listsMemo.lists, held) };
+    const full = this.playlistsNow();
+    this.listsMemo = { at, made, lists: full };
+    return { lists: shapeLists(full, held) };
+  }
+
+  private playlistsNow(): (Dict & { id: string; items: unknown[] })[] {
     const lists = this.storedPlaylists();
     const played = this.playedKeys();
     const byKey = this.knownTracks();
@@ -2661,8 +3102,7 @@ export class LocalApi {
       return this.withDate(own.length ? { ...t, tags: own } : t);
     };
     if (lists.some((l) => l.entries.some((e) => { const t = withTags(byKey.get(e.key) ?? null); return t && t['kind'] !== 'radio-programme' && t['provider'] !== 'imported' && this.savedWants(t); }))) this.kickSavedGenres();
-    return {
-      lists: lists.map((l) => {
+    return lists.map((l) => {
         const pending = l.entries.filter((e) => wanting.has(e.key)).length;
         const items = l.entries.map((e) => ({ key: e.key, added: e.added, track: withTags(byKey.get(e.key) ?? null), played: played.has(e.key) }));
         return {
@@ -2676,8 +3116,7 @@ export class LocalApi {
           items: this.importedCharacteristics(items),
           ...(pending ? { genre_pending: pending } : {}),
         };
-      }),
-    };
+      });
   }
 
   /**
@@ -2795,7 +3234,7 @@ export class LocalApi {
       throw e;
     }
     await this.savePlaylists(lists);
-    return ok(this.playlists());
+    return ok(this.playlists(parseHeld(body['have'])));
   }
 
   // ---- playback ------------------------------------------------------------------------
@@ -2959,6 +3398,7 @@ export class LocalApi {
   // ---- status / reset / self-test --------------------------------------------------------
   private async status(): Promise<Dict> {
     const settings = this.settings();
+    await this.syncNetwork();
     let free = 0;
     let quota = 0;
     let usage = 0;
@@ -2985,6 +3425,7 @@ export class LocalApi {
     }
     return {
       storage: { areas: { cache, other: Math.max(0, usage - cache) }, queue_audio: queueAudio, app_data: usage, limits: { cache: 150_000_000 }, total: usage + (queueAudio?.bytes ?? 0), hard_cap: quota, target: quota, free_disk: free, not_counted: 'Songs you Download are copied to your music folder and are not counted here.' },
+      allowance: this.budget.state(),
       transfer_today: this.store.transferToday(), transfer_daily_cap: Math.trunc(Number(settings['daily_mb']) * 1e6), transfer_request_cap: Math.trunc(Number(settings['request_mb']) * 1e6),
       transfer_note: 'Network the page itself read today. Songs fetched by the built-in downloader do not pass through the page and are not counted here.',
       cache: { hits: this.store.cacheHits, misses: this.store.cacheMisses, bytes: cache, vectors: this.store.vectorCount() },
@@ -3021,8 +3462,7 @@ export class LocalApi {
   private async selftest(): Promise<LocalResponse> {
     if (!this.encoder) return fail(409, 'Audio model is not available on this device.');
     const job = new Job('selftest');
-    const daily = Math.trunc(Number(this.settings()['daily_mb']) * 1e6);
-    job.meter = new Meter(5_000_000, Math.max(0, daily - Object.values(this.store.transferToday()).reduce((a, b) => a + b, 0)), (c, n) => this.store.addTransfer(c, n));
+    job.meter = this.budget.meter('interactive', 5_000_000);
     const t0 = performance.now();
     try {
       const pairs: [string, Float64Array][] = [];

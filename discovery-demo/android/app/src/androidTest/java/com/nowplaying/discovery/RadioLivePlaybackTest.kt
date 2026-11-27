@@ -38,6 +38,57 @@ class RadioLivePlaybackTest {
     while (SystemClock.elapsedRealtime() < end) { if (test()) return; Thread.sleep(100) }
     fail(message + ": " + RadioNative.session?.let { "station=${it.station},frames=${it.ring.end},heard=${it.ring.heard},error=${it.ring.failed}" })
   }
+  @Test fun firstAlphabeticalStationTunesAndPlays() {
+    assumeTrue("Live radio requires explicit network opt-in", InstrumentationRegistry.getArguments().getString("liveRadio") == "true")
+    val browser = await { MediaBrowser.Builder(ctx, SessionToken(ctx, ComponentName(ctx, PlaybackService::class.java))).buildAsync() }
+    try {
+      val rows = await { browser.getChildren("radio/az/0", 0, 100, null) }.value!!
+      val playable = rows.filter { it.mediaMetadata.isPlayable == true }
+      val first = requireNotNull(playable.firstOrNull()) { "A-Z page has no playable stations" }
+      val stationId = requireNotNull(RadioCatalog.stationId(first.mediaId))
+      val station = requireNotNull(RadioCatalog.resolve(ctx, stationId))
+      val azIds = playable.mapNotNull { RadioCatalog.stationId(it.mediaId) }
+      android.util.Log.i("AirwaveRadioLiveQA", "FIRST_AZ id=$stationId name=${station.name} url=${station.url}")
+      main { browser.setMediaItem(first); browser.prepare(); browser.play() }
+      val end = SystemClock.elapsedRealtime() + 40000
+      while (SystemClock.elapsedRealtime() < end) {
+        val s = RadioNative.session
+        if (s != null && s.station in azIds && s.ring.heard > 48000 && s.ring.failed == null) break
+        Thread.sleep(100)
+      }
+      val live = RadioNative.session
+      android.util.Log.i("AirwaveRadioLiveQA", "FIRST_AZ_RESULT first=$stationId station=${live?.station} heard=${live?.ring?.heard} failed=${live?.ring?.failed?.message}")
+      assertTrue("A-Z tune decoded audio on the selected station or an automatic HTTP-404 fallback; error=${live?.ring?.failed?.message}",
+        live != null && live.station in azIds && live.ring.heard > 48000 && live.ring.failed == null)
+      until("Android Auto controller reports playback after the A-Z tune") { readMain { browser.isPlaying } }
+    } finally { main { browser.pause(); browser.release() }; RadioNative.handle(ctx, org.json.JSONObject().put("op", "stop")) }
+  }
+
+  @Test fun wgn720CurrentAddressCanTuneAndPlay() {
+    assumeTrue("Live radio requires explicit network opt-in", InstrumentationRegistry.getArguments().getString("liveRadio") == "true")
+    val browser = await { MediaBrowser.Builder(ctx, SessionToken(ctx, ComponentName(ctx, PlaybackService::class.java))).buildAsync() }
+    try {
+      val query = "WGN 720"
+      await { browser.search(query, null) }
+      val rows = await { browser.getSearchResult(query, 0, 50, null) }.value!!
+        .filter { RadioCatalog.stationId(it.mediaId) != null }
+      val wgn = requireNotNull(rows.firstOrNull { it.mediaMetadata.title.toString().contains("WGN 720", true) }) {
+        "Radio Browser search returned no WGN 720 station"
+      }
+      val id = requireNotNull(RadioCatalog.stationId(wgn.mediaId))
+      val station = requireNotNull(RadioCatalog.resolve(ctx, id)) { "WGN 720 could not be resolved" }
+      assertTrue("WGN resolves to a public station stream", RadioCatalog.publicUrl(station.url))
+      assertFalse("WGN must not use an expired directory session address", station.url.contains("session-id="))
+      main { browser.setMediaItem(wgn); browser.prepare(); browser.play() }
+      until("WGN 720 live address decoded and played audio") {
+        RadioNative.session?.let { it.station == id && it.ring.heard > 48000 && it.ring.failed == null } == true
+      }
+      val live = RadioNative.session!!
+      assertTrue("WGN delivered audible samples", live.ring.heard > 48000)
+      android.util.Log.i("AirwaveRadioLiveQA", "PASS WGN 720 stream=${station.url} id=$id decoded=${live.ring.heard} frames")
+    } finally { main { browser.pause(); browser.release() }; RadioNative.handle(ctx, org.json.JSONObject().put("op", "stop")) }
+  }
+
   @Test fun directWgciFrequencyAndVoiceQueriesWorkOutsideRadioContext() {
     assumeTrue("Live radio requires explicit network opt-in", InstrumentationRegistry.getArguments().getString("liveRadio") == "true")
     val browser = await { MediaBrowser.Builder(ctx, SessionToken(ctx, ComponentName(ctx, PlaybackService::class.java))).buildAsync() }
@@ -89,7 +140,7 @@ class RadioLivePlaybackTest {
     val browser = await { MediaBrowser.Builder(ctx, SessionToken(ctx, ComponentName(ctx, PlaybackService::class.java))).buildAsync() }
     try {
       val initials = await { browser.getChildren("radio/all", 0, 40, null) }.value!!
-      assertEquals("All stations exposes All plus English A-Z and #", 28, initials.size)
+      assertEquals("All stations exposes All, A-Z, # and the separate numbers folder", 29, initials.size)
       val kChildren = await { browser.getChildren("radio/letter/K/0", 0, 100, null) }.value!!
       android.util.Log.i("AirwaveRadioLiveQA", "K children=${kChildren.size} first=${kChildren.take(3).map { it.mediaId + ":" + it.mediaMetadata.title }}")
       val k = kChildren.filter { it.mediaMetadata.isPlayable == true }

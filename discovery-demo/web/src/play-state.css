@@ -1,0 +1,91 @@
+/* PLAY-LIVE-001 / ALBUM-PLAY-STATE-001 / PLAY-RING-002 (owner, 2026-11-22): "Make the starting outline for the play
+   button and the artist star button the same color and thickness as the icons here ... the download ring shouldnt
+   spin it should grow from right to left until the circle is complete representing a full download, then ensure the
+   play button inside the blue play button is white".
+   Still to download: white, black arrow, and the same 1px light outline as the row's download / queue / star icons.
+   As the real download progress (--dl, 0-100) rises, a 2px black arc grows from the middle of the top, round the right
+   side and back up the left until it is a complete circle (PLAY-RING-003); an unknown percent shows no ring yet (0), and nothing ever spins. A song's own
+   download fills its ring; a list's ring is the share of its songs on this device. Ready is a solid blue disc with a
+   white arrow; a list turns blue once every song is downloaded. The rings sit inside the button's own box, so nothing
+   moves when they appear or go. */
+/* PLAY-RING-004 (owner, 2026-11-22): "I dont see the download outline animation playing on the play button or album
+   button, or artist button, it looks to not happen or be stuck. Ensure this animation plays and works to accurately
+   show the download progress on the buttons before turning blue". --dl is a registered number, so the arc glides from
+   one reported percent to the next instead of jumping (the numbers themselves are only ever the real ones). While a
+   download has started but reports no percent yet, the thin outline breathes between grey and black: it says "working"
+   without inventing a number, and nothing turns. */
+@property --dl {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0;
+}
+.iconbtn.playbtn.playbtn[data-progress='true'],
+.iconbtn.rowdl.rowdl[data-progress='true'],
+button.listplay.listplay:not([data-ready='true']) {
+  position: relative;
+  box-shadow: inset 0 0 0 1px var(--hair);
+}
+.iconbtn.playbtn.playbtn[data-moving='true'],
+.iconbtn.rowdl.rowdl[data-moving='true'],
+button.listplay.listplay[data-moving='true'] {
+  animation: dl-wait 1.2s ease-in-out infinite;
+}
+@keyframes dl-wait {
+  50% { box-shadow: inset 0 0 0 1px var(--ink); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .iconbtn.playbtn.playbtn[data-moving='true'],
+  .iconbtn.rowdl.rowdl[data-moving='true'],
+  button.listplay.listplay[data-moving='true'] { animation: none; box-shadow: inset 0 0 0 1px var(--ink-2); }
+}
+.iconbtn.playbtn.playbtn[data-progress='true'] {
+  background-color: #fff;
+  color: var(--ink);
+}
+/* ROW-DL-STATE-001: a song's Download icon wears the same ring while its file downloads. */
+.iconbtn.playbtn[data-progress='true']::before,
+.iconbtn.rowdl[data-progress='true']::before,
+button.listplay[data-progress='true']::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 2px;
+  pointer-events: none;
+  background: conic-gradient(from 0deg, var(--ink) calc(var(--dl, 0) * 1%), transparent 0);
+  transition: --dl 450ms linear;
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+}
+/* The glyphs carry no colour of their own (they draw black): these take the button's, so an arrow on blue is white.
+   PLAYER-MAIN-WHITE-001: the same for the player's and the radio player's main play/pause button on every tab. */
+.tbtn.tbtn--main svg { fill: currentColor; }
+.iconbtn.playbtn svg,
+button.listplay svg,
+.artist__star svg { fill: currentColor; }
+
+/* A list's Play button: black and white until every song is on this device, then the blue main-action fill. */
+button.listplay.listplay:not([data-ready='true']) {
+  background: #fff;
+  color: var(--ink);
+  border-color: transparent;
+}
+button.listplay.listplay[data-ready='true'] {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+  box-shadow: none;
+}
+@media (hover: hover) {
+  .iconbtn.playbtn.playbtn[data-progress='true']:hover:not(:disabled),
+  button.listplay.listplay:not([data-ready='true']):hover:not(:disabled) {
+    background: #f4f3ef;
+  }
+  button.listplay.listplay[data-ready='true']:hover:not(:disabled) {
+    filter: brightness(1.1);
+  }
+}
+button.listplay.listplay:active:not(:disabled) {
+  filter: brightness(0.95);
+}

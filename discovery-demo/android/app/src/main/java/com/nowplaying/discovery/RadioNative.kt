@@ -18,11 +18,20 @@ import org.json.JSONObject
 /** RADIO-001 native network/decoder boundary. The renderer never receives remote audio URLs to
  * play directly; redirects and HLS segments are individually checked against private destinations. */
 object RadioNative {
-  data class Session(val id: String, val station: String, val ring: RadioRing, val data: JSONObject, var paused: Boolean = false, @Volatile var stopped: Boolean = false, var process: Process? = null, var connection: HttpURLConnection? = null)
+  data class Session(val id: String, val station: String, val ring: RadioRing, val data: JSONObject, var paused: Boolean = false, @Volatile var stopped: Boolean = false, var process: Process? = null, var connection: HttpURLConnection? = null, val autoSkipAttempts: Int = 0) {
+    /** RADIO-ICY-CLOCK-001 / RADIO-TITLE-INBAND-001: in-band titles of earlier connections, each on the ring clock. */
+    val icy: MutableList<RadioIcy.Mark> = java.util.Collections.synchronizedList(mutableListOf())
+    /** The playing connection's titles and how many audio bytes it has delivered. */
+    @Volatile var icyLive: RadioIcy.Marks? = null
+    @Volatile var icyLiveBytes: () -> Long = { 0L }
+    fun icyMarks(): List<RadioIcy.Mark> = (synchronized(icy) { icy.toList() } + (icyLive?.resolved(ring.end, icyLiveBytes()) ?: emptyList())).takeLast(8)
+  }
   @Volatile var session: Session? = null; private set
   /** RADIO-SHUFFLE-001: with shuffle on, car/phone skips tune a RANDOM other station of the tuned
    * list. It survives station switches (each one is a new Session) and resets when radio ends. */
   @Volatile var shuffle: Boolean = false
+    // RADIO-SHUFFLE-NO-REPEAT-001: turning shuffle on or off starts a new round of unplayed stations.
+    set(on) { if (field != on) RadioCatalog.resetShuffle(session?.station); field = on }
   private val metadata = java.util.concurrent.ConcurrentHashMap<String, JSONObject>()
   fun publicAddress(a: InetAddress): Boolean {
     if (a !is Inet4Address || a.isAnyLocalAddress || a.isLoopbackAddress || a.isLinkLocalAddress || a.isSiteLocalAddress || a.isMulticastAddress) return false
@@ -70,13 +79,13 @@ object RadioNative {
   fun stop() { session?.let { it.stopped = true; it.connection?.disconnect(); it.process?.destroy(); it.ring.close() }; session = null }
   private fun pump(s: Session, raw: String, depth: Int = 0): String? {
     require(depth <= 4) { "Too many station playlists" }
-    val c = open(raw); s.connection = c
+    val c = open(raw, icy = true); s.connection = c
     try {
       val type = c.contentType ?: ""
       if (type.contains("mpegurl", true) || type.contains("scpls", true) || Regex("\\.(m3u8?|pls)(\\?|$)", RegexOption.IGNORE_CASE).containsMatchIn(c.url.toString())) {
         val bytes = c.inputStream.use { it.readNBytes(1_000_001) }; require(bytes.size <= 1_000_000)
         val t = bytes.toString(Charsets.UTF_8); val lines = t.lines().map { it.trim() }
-        if (!t.contains("#EXT-X-")) { val next = lines.map { it.replace(Regex("^File\\d+="), "") }.firstOrNull { it.startsWith("http") } ?: error("No stream in playlist"); return pump(s, next, depth + 1) }
+        if (!t.contains("#EXT-X-")) return RadioReconnect.firstThatPlays(RadioReconnect.playlistEntries(t), { s.ring.end }) { pump(s, it, depth + 1) }
         if (t.contains("#EXT-X-STREAM-INF")) { val i = lines.indexOfFirst { it.startsWith("#EXT-X-STREAM-INF") }; return pump(s, c.url.toURI().resolve(lines[i + 1]).toString(), depth + 1) }
         require(!Regex("#EXT-X-KEY:.*METHOD=(?!NONE)").containsMatchIn(t)) { "Encrypted broadcasts are not supported" }
         val seen = hlsSeen.getOrPut(s.id) { LinkedHashSet() }
@@ -90,7 +99,18 @@ object RadioNative {
         if (!s.stopped && !t.contains("#EXT-X-ENDLIST")) { Thread.sleep(1500); return c.url.toString() }
         return null
       }
-      c.inputStream.use { input -> val b = ByteArray(32768); while (!s.stopped) { val n = input.read(b); if (n < 0) error("Station disconnected"); s.process!!.outputStream.write(b, 0, n) } }
+      // RADIO-ICY-CLOCK-001: a station that interleaves titles has them taken out here and placed on the ring clock.
+      val metaint = c.getHeaderField("icy-metaint")?.toIntOrNull()?.takeIf { it in 1..262144 }
+      val kbps = RadioIcy.kbps(c.getHeaderField("icy-br")); val at = s.ring.end
+      val marks = metaint?.let { RadioIcy.Marks(at, kbps) }
+      val demux = metaint?.let { RadioIcy.Demux(it) { title, bytes, first -> marks!!.add(title, bytes, first) } }
+      if (marks != null) { s.icyLive = marks; s.icyLiveBytes = { demux!!.audioBytes } }
+      try {
+        c.inputStream.use { input -> val b = ByteArray(32768); while (!s.stopped) { val n = input.read(b); if (n < 0) error("Station disconnected"); val o = s.process!!.outputStream; if (demux == null) o.write(b, 0, n) else demux.feed(b, n) { x, off, len -> o.write(x, off, len) } } }
+      } finally {
+        // A reconnect starts a new set; this connection's titles stay on the ring clock.
+        if (marks != null && s.icyLive === marks) { val done = marks.resolved(s.ring.end, demux!!.audioBytes); synchronized(s.icy) { s.icy += done; while (s.icy.size > 8) s.icy.removeAt(0) }; s.icyLive = null }
+      }
       return null
     } finally { c.disconnect() }
   }
@@ -106,7 +126,7 @@ object RadioNative {
     // A force-stopped process cannot close its session ring. Purge only our orphan session files.
     ctx.cacheDir.listFiles()?.filter { it.name.matches(Regex("radio-[0-9a-f-]{36}\\.pcm")) }?.forEach { it.delete() }
     val id = UUID.randomUUID().toString()
-    val s = Session(id, cmd.optString("stationId"), RadioRing(48000 * 600, File(ctx.cacheDir, "radio-$id.pcm")), data); session = s
+    val s = Session(id, cmd.optString("stationId"), RadioRing(48000 * 600, File(ctx.cacheDir, "radio-$id.pcm")), data, autoSkipAttempts = cmd.optInt("autoSkipAttempts").coerceIn(0, RadioAutoSkip.MAX_ATTEMPTS)); session = s
     val pb = ProcessBuilder(File(ctx.applicationInfo.nativeLibraryDir, "libffmpeg.so").path, "-hide_banner", "-loglevel", "error", "-protocol_whitelist", "pipe", "-i", "pipe:0", "-vn", "-ac", "2", "-ar", "48000", "-f", "s16le", "pipe:1")
     // Measured 2026-11-16: ffmpeg's own libraries pull in librubberband, which needs libc++_shared
     // from the Python package youtubedl-android unpacks beside it. Without that directory the
@@ -115,15 +135,37 @@ object RadioNative {
     pb.environment()["LD_LIBRARY_PATH"] = listOf(File(packages, "ffmpeg/usr/lib"), File(packages, "python/usr/lib"))
       .joinToString(":") { it.path } + ":" + ctx.applicationInfo.nativeLibraryDir
     val p = pb.start(); s.process = p
-    Thread({ try { val b = ByteArray(32768); var held = 0; while (!s.stopped) { val n = p.inputStream.read(b, held, b.size - held); if (n < 0) break; val size = n + held; val whole = size - size % 4; s.ring.write(b, whole); held = size % 4; if (held > 0) System.arraycopy(b, whole, b, 0, held) }; if (!s.stopped) s.ring.failed = IllegalStateException("Radio decoder stopped") } catch (e: Throwable) { if (!s.stopped) s.ring.failed = e } }, "AirwaveRadioPCM").start()
+    Thread({ try { val b = ByteArray(32768); var held = 0; while (!s.stopped) { val n = p.inputStream.read(b, held, b.size - held); if (n < 0) break; val size = n + held; val whole = size - size % 4; s.ring.write(b, whole); held = size % 4; if (held > 0) System.arraycopy(b, whole, b, 0, held) }; if (!s.stopped) s.ring.fail(IllegalStateException("Radio decoder stopped")) } catch (e: Throwable) { if (!s.stopped) s.ring.fail(e) } }, "AirwaveRadioPCM").start()
     // Stopping a station destroys ffmpeg, which interrupts this reader. An uncaught exception on a
     // background thread takes the whole app down, so every stream reader ends quietly.
     Thread({ runCatching { p.errorStream.bufferedReader().useLines { lines -> lines.forEach { if (!s.stopped) android.util.Log.d("AirwaveRadio", it.take(300)) } } } }, "AirwaveRadioLog").start()
-    Thread({ try { var u: String? = cmd.getString("url"); while (!s.stopped && u != null) u = pump(s, u) } catch (e: Throwable) { if (!s.stopped) s.ring.failed = e } finally { if (!s.stopped) p.destroy(); hlsSeen.remove(s.id) } }, "AirwaveRadioStream").start()
+    // RADIO-ROBUST-001: a stream that was playing and drops reconnects to the station's address (RadioReconnect).
+    Thread({
+      val first = cmd.getString("url"); var tries = 0; var mark = 0L
+      try {
+        while (!s.stopped) {
+          try { var u: String? = first; mark = s.ring.end; while (!s.stopped && u != null) u = pump(s, u); break }
+          catch (e: Throwable) {
+            if (s.stopped) break
+            val next = RadioReconnect.next(s.ring.end > 0, s.ring.end - mark, tries)
+            if (next == null) {
+              s.ring.fail(e)
+              if (RadioAutoSkip.shouldAdvance(e, s.ring.end, s.autoSkipAttempts)) {
+                android.util.Log.i("AirwaveRadio", "station ${s.station} returned HTTP 404 before audio; trying the next station")
+                RadioCatalog.skipAfterFailure(ctx, s.id, s.station, s.autoSkipAttempts + 1)
+              }
+              break
+            }
+            tries = next; android.util.Log.d("AirwaveRadio", "reconnect $tries after ${e.message}")
+            Thread.sleep(RadioReconnect.delayMs(tries))
+          }
+        }
+      } catch (e: Throwable) { if (!s.stopped) s.ring.fail(e) } finally { if (!s.stopped) p.destroy(); hlsSeen.remove(s.id) }
+    }, "AirwaveRadioStream").start()
     EngineHub.fromPage(JSONObject().put("op", "radio").put("id", s.id).put("title", cmd.optString("title", "Live radio")).put("station", cmd.optString("name", "Radio")).toString())
     return s
   }
-  private fun snapshot(s: Session): JSONObject = JSONObject().put("id", s.id).put("stationId", s.station).put("station", s.data).put("paused", s.paused).put("shuffle", shuffle).put("received", s.ring.end / 48000.0).put("position", s.ring.positionFrames / 48000.0).put("oldest", s.ring.oldest / 48000.0).put("heard", s.ring.heard / 48000.0).put("dropped", s.ring.dropped).put("state", if (s.ring.failed != null) "failed" else if (s.ring.end > 48000) "playing" else "buffering").put("error", s.ring.failed?.message ?: JSONObject.NULL).put("native", true)
+  private fun snapshot(s: Session): JSONObject = JSONObject().put("id", s.id).put("stationId", s.station).put("station", s.data).put("paused", s.paused).put("shuffle", shuffle).put("received", s.ring.end / 48000.0).put("position", s.ring.positionFrames / 48000.0).put("held", s.ring.held).put("starved", s.ring.starved).put("heardS", s.ring.heard / 48000.0).put("oldest", s.ring.oldest / 48000.0).put("heard", s.ring.heard / 48000.0).put("dropped", s.ring.dropped).put("state", if (s.ring.failed != null) "failed" else if (s.ring.end > 48000) "playing" else "buffering").put("error", s.ring.failed?.message ?: JSONObject.NULL).put("native", true).put("icy", org.json.JSONArray().also { a -> s.icyMarks().forEach { m -> a.put(JSONObject().put("at", m.at).put("title", m.title).put("first", m.first)) } })
   fun handle(ctx: Context, cmd: JSONObject): JSONObject {
     when (cmd.optString("op")) {
       "request" -> return JSONObject().put("text", fetchText(cmd.getString("url")))
@@ -133,6 +175,7 @@ object RadioNative {
         cmd.optJSONArray("stations")?.let { RadioCatalog.rememberStations(it) }
         val s = start(ctx, cmd)
         RadioCatalog.selectContext(s.station)
+        RadioCatalog.markPlayed(s.station)
         return snapshot(s)
       }
       // One favourites store for the phone page, the car browse tree and the station star action.

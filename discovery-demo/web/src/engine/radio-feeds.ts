@@ -2,6 +2,7 @@
 // readCurrentProgramme. Only an exact broadcaster hostname/stream mount selects an adapter.
 import { parseBroadcast, freshBroadcast, publicUrl, type Broadcast, type RadioStation } from './radio';
 import { IHEART_HOSTS, readIheartProgrammeDetails } from './radio-schedule';
+import { parseTuneinNow, tuneinGuide, tuneinNowUrl } from './radio-tunein';
 type GetText = (url: string) => Promise<string>;
 const BBC = new Set(['bbc_radio_one', 'bbc_radio_two', 'bbc_radio_three', 'bbc_radio_fourfm', 'bbc_radio_fourlw', 'bbc_radio_five_live', 'bbc_6music', 'bbc_1xtra', 'bbc_radio_four_extra', 'bbc_asian_network', 'bbc_world_service']);
 export function tritonCue(text: string, now = Date.now()): Broadcast | null {
@@ -14,9 +15,25 @@ export function tritonCue(text: string, now = Date.now()): Broadcast | null {
   for (const i of items.slice(1)) { if (prop(i, 'cue_title') !== title || prop(i, 'track_artist_name') !== artist || prop(i, 'program_id') !== programme) break; const t = Number(prop(i, 'cue_time_start')); if (t > 0 && (!began || t < began)) began = t; }
   const b = parseBroadcast(artist ? `${artist} - ${title}` : title, 'Triton official feed', now); return freshBroadcast({ ...b, startedAt: began > 0 ? began : null, duration: duration > 0 ? duration : null }, now);
 }
+/** iHeart's song feed for an iHeart station id; null when it names nothing current. */
+async function iheartTrack(id: string, get: GetText, now: number): Promise<Broadcast | null> {
+  const text = await get(`https://us.api.iheart.com/api/v3/live-meta/stream/${id}/currentTrackMeta?defaultMetadata=true`);
+  if (!text.trim()) return null;
+  const x = JSON.parse(text);
+  if (!x?.title || Number(x.endTime) > 0 && now > x.endTime + 15000) return null;
+  return { ...parseBroadcast(x.artist ? `${x.artist} - ${x.title}` : x.title, 'iHeart official feed', now), startedAt: x.startTime, duration: x.trackDuration || null, validUntil: x.endTime || null };
+}
 export async function publisherBroadcast(s: RadioStation, get: GetText, now = Date.now()): Promise<Broadcast | null> {
   const u = new URL(s.url), host = u.hostname.toLowerCase(); const j = async (url: string) => JSON.parse(await get(url));
   let m: RegExpExecArray | null;
+  // RADIO-IHEART-META-001: a station from iHeart's directory streamed by another host (Audacy, EMF, Futuri...) still has
+  // iHeart's song feed, asked by its iHeart id; with no answer, the host's own feed below is tried.
+  const ihr = s.iheartId && /^\d{1,7}$/.test(s.iheartId) ? s.iheartId : /^ihr-(\d{1,7})$/.exec(s.id)?.[1];
+  if (ihr && !/(^|\.)revma\.ihrhls\.com$/.test(host)) { try { const b = await iheartTrack(ihr, get, now); if (b) return b; } catch { /* the host's feed is tried next */ } }
+  // RADIO-PLAYING-NOW-001: a station found through TuneIn plays through TuneIn's address, so its song comes from TuneIn's
+  // now-playing feed. An ad has no track and gives nothing: ICY is asked next and nothing is invented.
+  const ti = tuneinGuide(s.id);
+  if (ti) { try { return parseTuneinNow(await get(tuneinNowUrl(ti)), now); } catch { return null; } }
   if (/(^|\.)somafm\.com$/.test(host) && (m = /^\/([a-z0-9]+)-/i.exec(u.pathname))) {
     const x = (await j(`https://somafm.com/songs/${m[1]}.json`)).songs?.[0]; if (!x?.title) return null;
     return { ...parseBroadcast(x.artist ? `${x.artist} - ${x.title}` : x.title, 'SomaFM official feed', now), startedAt: Number(x.date) > 0 ? Number(x.date) * 1000 : null };
@@ -26,7 +43,7 @@ export async function publisherBroadcast(s: RadioStation, get: GetText, now = Da
     const x = await j(`https://public.radio.co/stations/${m[1]}/status`); return parseBroadcast(x.current_track?.title || null, 'radio.co official feed', now);
   }
   if (/(^|\.)revma\.ihrhls\.com$/.test(host) && (m = /^\/zc(\d{1,7})(?:\/|$)/.exec(u.pathname))) {
-    try { const x = await j(`https://us.api.iheart.com/api/v3/live-meta/stream/${m[1]}/currentTrackMeta?defaultMetadata=true`); if (x?.title && !(Number(x.endTime) > 0 && now > x.endTime + 15000)) return { ...parseBroadcast(x.artist ? `${x.artist} - ${x.title}` : x.title, 'iHeart official feed', now), startedAt: x.startTime, duration: x.trackDuration || null, validUntil: x.endTime || null }; } catch { /* schedule is a separate, useful answer */ }
+    try { const b = await iheartTrack(m[1]!, get, now); if (b) return b; } catch { /* schedule is a separate, useful answer */ }
     const programme = await readIheartProgrammeDetails(s.url, async url => { if (!IHEART_HOSTS.includes(new URL(url).hostname)) throw Error('Untrusted schedule host'); return j(url); }, now);
     return programme ? { ...parseBroadcast(programme.title, 'iHeart official schedule', now), ...programme, kind: 'programme', artist: null } : null;
   }

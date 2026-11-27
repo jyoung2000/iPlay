@@ -15,8 +15,9 @@ const feed = JSON.stringify([{ TALB: '', TIT2: 'WTF GOIN (feat. 21 Savage)', TPE
 describe('Futuri (cdnstream1) now-playing feed', () => {
   it('reads the song on air and its start time from the station mount', async () => {
     const asked: string[] = [];
-    const b = await publisherBroadcast(power92, async (u) => { asked.push(u); return feed; }, now);
-    expect(asked).toEqual(['https://yp.cdnstream1.com/metadata/pptsa5hdbog/cjo5jxmng7u/current.json']);
+    const b = await publisherBroadcast(power92, async (u) => { asked.push(u); return u.includes('iheart.com') ? '' : feed; }, now);
+    // iHeart's feed is asked first (RADIO-IHEART-META-001); it names nothing for Power 92, so the station's own feed answers
+    expect(asked).toEqual(['https://us.api.iheart.com/api/v3/live-meta/stream/12904/currentTrackMeta?defaultMetadata=true', 'https://yp.cdnstream1.com/metadata/pptsa5hdbog/cjo5jxmng7u/current.json']);
     expect(b).toMatchObject({ artist: 'Belly Gang Kushington', state: 'current', kind: 'song', source: 'Futuri official feed', startedAt: 1795143628360, artwork: 'https://img.example.com/a.jpg' });
     expect(b!.title).toMatch(/^WTF GOIN/);
   });
@@ -25,10 +26,10 @@ describe('Futuri (cdnstream1) now-playing feed', () => {
     const old = JSON.stringify([{ TIT2: 'Echo', TPE1: 'R.Kelly', played_on: (now - 40 * 60000) / 1000, last_seen: (now - 30 * 60000) / 1000 }]);
     expect(await publisherBroadcast(power92, async () => old, now)).toBeNull();
   });
-  it('the player asks for what is playing every 10 s, not 20 s', () => {
+  it('the player asks for what is playing every 5 s (RADIO-TITLE-INBAND-001; it was 10 s, and 20 s before that)', () => {
     const src = readFileSync(resolve(process.cwd(), 'src', 'engine', 'radio-client.ts'), 'utf8');
-    expect(src).not.toMatch(/refreshMetadata\(gen\), 20000\)/);
-    expect(src.match(/setInterval\(\(\) => void this\.refreshMetadata\(gen\), 10000\)/g)).toHaveLength(2);
-    expect(src).toMatch(/const b = await stationMetadata\(s, false, 9000\)/);
+    expect(src).toMatch(/export const RADIO_META_EVERY_MS = 5000;/);
+    expect(src.match(/setInterval\(\(\) => void this\.refreshMetadata\(gen\), RADIO_META_EVERY_MS\)/g)).toHaveLength(2);
+    expect(src).toMatch(/const b = await stationMetadata\(s, false, RADIO_META_EVERY_MS - 500\)/);
   });
 });

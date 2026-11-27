@@ -23,7 +23,7 @@ Feedback writes must succeed before the UI marks the judgement as saved; pending
 - Android release on emulator-5554: actual “overseas” search row and player gain checks after playlist save; dislike and undo persist. After playlist removal, exact playlist readback has count 0 and player has only the star. Removal/undo survive a WebView reload.
 - Android populated Saved layout script passes at 320/360/412/1280 CSS px (title widths ~193/233/285/583 px, no overlap).
 
-Evidence under `C:/Users/jalon/AppData/Local/hermes/testing/star-dislike/`: Windows smoke JSON, Android smoke/readback JSON, Windows queue geometry, screenshots. The initial Android smoke stopped at Playwright's synchronous `uncheck()` assertion; the actual async save completed. Exact-target raw-CDP readback and reload confirmed the result; this was a harness timing issue, not a claimed passing full Playwright run.
+Evidence under `<test-artifacts>/star-dislike/`: Windows smoke JSON, Android smoke/readback JSON, Windows queue geometry, screenshots. The initial Android smoke stopped at Playwright's synchronous `uncheck()` assertion; the actual async save completed. Exact-target raw-CDP readback and reload confirmed the result; this was a harness timing issue, not a claimed passing full Playwright run.
 
 ## Scope preserved
 No EQ, mixer, source-permission, download, identity, Android Auto session or audio DSP logic changed. A reset must never remove copies the owner chose to Keep in their Music folder.

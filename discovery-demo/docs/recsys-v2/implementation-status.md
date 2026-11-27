@@ -1,6 +1,6 @@
 # recsys-v2 implementation status
 
-Date: 2026-11-01. Branch `recsys-v2` in `C:/Users/jalon/projects/AudioWave2.0/AudioWave2.0-claude-now-playing-music-suite-tfzu57/discovery-demo`, base `22ffd3e` (`main` untouched). Research assets: `D:/MusicRecommendationLab/`. No new paid service or LLM dependency. The seven reference clones were downloaded shallow and reviewed in `repository-review.md`; no GPL implementation was merged.
+Date: 2026-11-01. Branch `recsys-v2` in `<workspace-root>/discovery-demo`, base `22ffd3e` (`main` untouched). Research assets: `<research-workspace>/`. No new paid service or LLM dependency. The seven reference clones were downloaded shallow and reviewed in `repository-review.md`; no GPL implementation was merged.
 
 ## Implemented and verified
 
@@ -19,7 +19,7 @@ Date: 2026-11-01. Branch `recsys-v2` in `C:/Users/jalon/projects/AudioWave2.0/Au
 - Session frequency and day/week duration charts, actual impression-on-display audit, audio-calibration/model-identity revalidation, identity-confidence UI, direct Android APK and Windows executable smoke tests, live full playback/seek through YouTube embed, live SoundCloud widget telemetry, and latency/holdout predictive evaluation remain outstanding. No model-file live success: browser HEAD returned 405. Provider capability status distinguishes health-probe results from untested features.
 - The Python server is a development/reference runtime; shipped native apps use TS and were not built in this run. Browser `?local=1` provider fetches failed CORS without the native bridge; the in-app engine was unit/integration-tested in isolation, but not live in the Android/WebView or Electron shell here.
 - The parent monorepo `pnpm styleguide:check` was run and **failed** on two pre-existing freshness stamps outside this nested repository: `docs/design/styleguide.html` and `design/frontends/airwave-now-playing.html` (`source fingerprint 085eaf11340b48b8`). `design/ux-rules.json` and `design/coverage.json` contain no `discovery-demo` entry. Rebuilding parent player mockups/styleguide/PDF would modify unrelated parent work, so those gates were not run here; this is an explicit remaining integration task, not a pass.
-- `D:/MusicRecommendationLab/reports/` and `/benchmarks/` hold the original local work products; exact copies of the eight text/JSON reports are committed under `discovery-demo/docs/recsys-v2/`. Screenshots remain local on D:.
+- `<research-workspace>/reports/` and `/benchmarks/` hold the original local work products; exact copies of the eight text/JSON reports are committed under `discovery-demo/docs/recsys-v2/`. Screenshots remain local on D:.
 
 ## How to run and roll back
 

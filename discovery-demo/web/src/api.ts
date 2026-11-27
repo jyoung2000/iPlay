@@ -2,6 +2,7 @@
  * Typed client for the discovery sidecar (../server/airwave_discovery/app.py). Shapes mirror what the
  * server returns today; optional fields are the ones the server omits when a provider does not know them.
  */
+import { ListCache, type Held, type WireReply } from './engine/playlist-delta';
 
 export type ProviderId = 'deezer' | 'ytmusic' | 'soundcloud' | 'spotify' | 'apple' | 'bandcamp' | 'audius' | 'hearthis' | 'archive' | 'radio';
 
@@ -118,6 +119,8 @@ export interface ArtistSummary {
   name: string;
   picture: string | null;
   detail: string | null;
+  /** Deezer's follower count when it gives one (ARTIST-SIZE-001 / ARTIST-FAV-001). */
+  fans?: number | null;
   url: string;
   alt?: string;
 }
@@ -256,6 +259,8 @@ export interface TasteSummary {
 export interface MoodAnswer {
   order: string[];
   changed: boolean;
+  /** 0.20.19: the mood (re-plan or lead) moved rows, not only the run cap. Drives the mood note. */
+  mood?: boolean;
   moved: string[];
   gain?: number;
   leading: string[];
@@ -283,6 +288,8 @@ export interface RecItem {
   characteristics?: Characteristics;
   /** QUEUE-ADD-001: the listener added this song to the queue themselves. */
   added?: boolean;
+  /** WP1 (A8): found by Find similar or a custom discovery; movable by mood and shuffle, never re-scored. */
+  found?: 'similar' | 'custom';
 }
 
 export interface AudioStats {
@@ -310,6 +317,8 @@ export interface RecResult {
   transfer: Record<string, number>;
   candidates?: number;
   empty_reason?: string;
+  /** NEXT-FAV-COLD-001: for a run with no starting song, which of stars / listening / sound it read. */
+  started_from?: string;
   sample?: { label: string; recorded: string };
   /** Set on the last finished queue restored from the server after a reload. */
   saved_at?: number;
@@ -444,6 +453,12 @@ export interface Settings {
   discover_while_listening?: boolean;
   /** MOOD-QUEUE-001: the now playing queue follows the listening mood (default on). */
   mood_queue?: boolean;
+  /** WP6: the mood plan ('v2' default: follows without locking in; 'v1': the old order, the rollback switch). */
+  mood_plan?: 'v1' | 'v2';
+  /** 0.20.19: mood lead (option 1). On by default; false = off. */
+  mood_lead?: boolean;
+  /** 0.20.19: longest run of one main genre from row 13 on (option 2). 0 = off; 3, 5 or 8. Default 5. */
+  genre_run_limit?: number;
   /**
    * The ten-band equaliser (EQ-001), stored as the engine's own config shape. Previews only: see
    * `engine/audio-bus.ts` for why iframe playback can never be filtered.
@@ -485,7 +500,24 @@ export interface Health {
   };
   checked_at?: number;
   /** ALLOWANCE-REFRESH-001: present when this read also cleared the day's download allowance. */
-  allowance_refreshed?: { cleared_bytes: number; day: string };
+  allowance_refreshed?: { cleared_bytes: number; day: string; /** ALLOWANCE-ARCH-001: bytes of background allowance given back. */ restored_bytes?: number };
+}
+
+/**
+ * ALLOWANCE-ARCH-001: only background work (queue top-ups, genre and album look-ups) draws on the allowance, and only
+ * on a metered connection. It refills through the day; what the listener asks for and playback are never limited.
+ */
+export interface Allowance {
+  capacity: number;
+  level: number;
+  refill_per_hour: number;
+  /** True off mobile data: nothing is limited. */
+  unmetered: boolean;
+  paused: boolean;
+  /** Unix seconds when paused background work resumes by itself. */
+  resumes_at: number | null;
+  /** Bytes read today by lane: interactive, playback, background (and `other` from older versions). */
+  today: Record<string, number>;
 }
 
 export interface Status {
@@ -502,6 +534,8 @@ export interface Status {
     free_disk: number;
     not_counted: string;
   };
+  /** ALLOWANCE-ARCH-001: the mobile data allowance for background work. Absent on an older engine. */
+  allowance?: Allowance;
   transfer_today: Record<string, number>;
   transfer_daily_cap: number;
   transfer_request_cap: number;
@@ -530,6 +564,21 @@ export interface PlaylistItem {
 
 /** A list the listener made. `discovery_ready` is false until every song in it has been played. */
 /** The starting songs, and the saved list they came from when one is the now playing queue. */
+/** ARTIST-FAV-001: a starred artist (engine/fav-artists.ts). */
+export interface FavArtist {
+  name: string;
+  deezerId: string | null;
+  fans: number | null;
+  picture: string | null;
+  pageId: string | null;
+  addedAt: number;
+}
+
+export interface FavArtistsView {
+  artists: FavArtist[];
+  algorithm?: { id: string; name: string };
+}
+
 export interface SeedsView {
   seeds: Track[];
   playlist?: { id: string; name: string } | null;
@@ -578,7 +627,7 @@ export interface PlaylistSummary {
 
 export type PlaylistAction = 'create' | 'rename' | 'delete' | 'add' | 'remove' | 'set' | 'save_album';
 
-export type FeedbackKind = 'qualified' | 'like' | 'dislike' | 'hide' | 'save' | 'replay' | 'complete' | 'skip' | 'unlike' | 'unsave' | 'undislike' | 'unhide';
+export type FeedbackKind = 'qualified' | 'like' | 'dislike' | 'hide' | 'save' | 'replay' | 'complete' | 'skip' | 'partial' | 'unlike' | 'unsave' | 'undislike' | 'unhide';
 
 export class ApiError extends Error {
   constructor(
@@ -591,6 +640,11 @@ export class ApiError extends Error {
 }
 
 // The Android shell injects AirwaveNative; ?local=1 runs the same engine in a desktop browser for testing.
+const listCache = new ListCache();
+const readLists = (have: Held) => call<WireReply>(`/api/playlists?have=${encodeURIComponent(JSON.stringify(have))}`);
+/** For tests: forget the lists this page holds. */
+export const resetListCacheForTest = (): void => listCache.clear();
+
 const inApp = (): boolean => typeof window !== 'undefined' && (Boolean((window as { AirwaveNative?: unknown }).AirwaveNative) || new URLSearchParams(window.location.search).has('local'));
 
 async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -690,6 +744,10 @@ export const api = {
   },
   completeSpotify: (title: string, artist: string) => call<{ tracks: Track[] }>('/api/complete-spotify', { method: 'POST', body: json({ title, artist }) }),
   seeds: () => call<SeedsView>('/api/seeds'),
+/** ARTIST-FAV-ALGO-001: the active algorithm's starred artists, and which algorithm that is. */
+  favArtists: () => call<FavArtistsView>('/api/fav-artists'),
+  editFavArtists: (body: { op: 'add'; artist: { name: string; pageId?: string | null; fans?: number | null; picture?: string | null } } | { op: 'remove'; name: string } | { op: 'set'; artists: unknown[] }) =>
+    call<FavArtistsView>('/api/fav-artists', { method: 'POST', body: json(body) }),
   /** PLAYLIST-QUEUE-001: a saved list takes the place of the now playing queue; every song becomes a starting song. */
   queuePlaylist: (id: string) => call<SeedsView & { missing: number }>('/api/queue/playlist', { method: 'POST', body: json({ id }) }),
   /** Bring back the queue a saved list replaced. */
@@ -734,10 +792,13 @@ export const api = {
   saved: () => call<{ items: SavedItem[] }>('/api/saved'),
   /** TAGS-ALWAYS-001: genres for songs outside the engine's lists (search results); null where nothing is known. */
   genres: (tracks: Track[]) => call<{ items: Record<string, Characteristics | null>; pending?: string[] }>('/api/genres', { method: 'POST', body: json({ tracks }) }),
-  playlists: () => call<{ lists: PlaylistSummary[] }>('/api/playlists'),
+  // PLAYLIST-DELTA-001: the app's own engine is told which lists this page already holds and sends only the rest.
+  playlists: () => (inApp() ? listCache.read(readLists) : call<{ lists: PlaylistSummary[] }>('/api/playlists')),
   /** Every list edit goes through one call and answers with the lists as they now stand. */
   playlistEdit: (action: PlaylistAction, opts: { ids?: string[]; id?: string; name?: string; key?: string; tracks?: Track[]; album?: AlbumView } = {}) =>
-    call<{ lists: PlaylistSummary[] }>('/api/playlists', { method: 'POST', body: json({ action, ...opts }) }),
+    (inApp()
+      ? listCache.read((have) => call<WireReply>('/api/playlists', { method: 'POST', body: json({ action, ...opts, have }) }), readLists)
+      : call<{ lists: PlaylistSummary[] }>('/api/playlists', { method: 'POST', body: json({ action, ...opts }) })),
   health: (refresh = false) => call<Health>(`/api/health${refresh ? '?refresh=1' : ''}`),
   status: () => call<Status>('/api/status'),
   reset: (clearCache: boolean) => call<{ ok: boolean }>('/api/reset', { method: 'POST', body: json({ clear_cache: clearCache }) }),
@@ -750,10 +811,11 @@ export const api = {
   sample: () => call<RecResult>('/api/sample'),
   last: () => call<RecResult>('/api/last'),
   /** GENRE-LOAD-001: look up the genres of a few of the queue's rows that have none; `left` says how many remain. */
-  queueGenres: () => call<{ items: { key: string; tags: Track['tags']; characteristics: Characteristics }[]; left: number; spent?: boolean }>('/api/queue/genres', { method: 'POST', body: json({}) }),
+  queueGenres: () => call<{ items: { key: string; tags: Track['tags']; characteristics: Characteristics }[]; left: number; spent?: boolean; /** ALLOWANCE-ARCH-001: when paused look-ups resume by themselves (unix seconds). */ resumes_at?: number }>('/api/queue/genres', { method: 'POST', body: json({}) }),
   rerank: (exclude: string[]) => call<RerankResult>('/api/rerank', { method: 'POST', body: json({ exclude }) }),
   /** MOOD-QUEUE-001: the order the movable songs still to come should play in for the listening mood. */
-  mood: (body: { upcoming: { track: Track; characteristics?: Characteristics | null }[]; score?: { track: Track; characteristics?: Characteristics | null }[]; shown?: string[]; current?: { track: Track; characteristics?: Characteristics | null }; signal?: { track: Track; kind: 'like' | 'dislike' | 'similar' | 'complete' | 'skip' } }) =>
+  // WP6: `upcoming[].score` is the engine's score (v2's base term); `current.heard` the seconds of it heard (D2 ramp).
+  mood: (body: { upcoming: { track: Track; characteristics?: Characteristics | null; score?: number | null }[]; score?: { track: Track; characteristics?: Characteristics | null }[]; shown?: string[]; current?: { track: Track; characteristics?: Characteristics | null; heard?: number }; signal?: { track: Track; kind: 'like' | 'dislike' | 'similar' | 'complete' | 'skip' } }) =>
     call<MoodAnswer>('/api/mood', { method: 'POST', body: json(body) }),
   profile: () => call<Profile>('/api/profile'),
 };

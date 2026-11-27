@@ -11,6 +11,7 @@ import { TASTE_WEIGHT, tasteFit, type TasteProfile } from './taste';
 import { tasteFit2, type TasteBlend } from './taste2';
 import { SEED_GUESS_SOURCE, SOUND_GUESS_SOURCE } from './infer';
 import { albumKeyOf, cleanAlbumTitle, type AlbumOf } from './album-key';
+import { tooClose } from './artist-variety';
 
 export const SEED_FACTORS = ['audio', 'genre', 'artist', 'provider', 'tempo'] as const;
 export const GLOBAL_FACTORS = ['feedback', 'freshness', 'novelty'] as const;
@@ -33,6 +34,11 @@ export const RELATION: Record<string, [number, string, boolean]> = {
   // COLOR-DISCOVERY-001: the listener's own colours asked the services for this, so discovery keeps
   // finding new music after the starting songs' own sources are spent. Exploration, not relatedness.
   taste_colour: [0.0, 'Your sound leans this way, so the services were asked for more of', false],
+  // DISCOVER-BREADTH-001: a song by an artist who shares a verified Deezer credit with the starting artist,
+  // and the same one or two steps further out. Each step out weighs less.
+  collab_1: [0.6, 'A song by an artist who has shared a credit with', true],
+  collab_2: [0.45, 'A song by a collaborator of a collaborator of', true],
+  collab_3: [0.3, 'A song by someone three collaborations out from', true],
 };
 export const EXPLORATION_RELATIONS = new Set(['genre_chart', 'taste_colour']);
 
@@ -94,6 +100,8 @@ export interface Scored {
   weightsUsed: Record<string, number>;
   tier: string;
   exposurePenalty: number;
+  /** REMOVE-FOREVER-001: pushed down for being like a song the listener removed. */
+  removedNear?: boolean;
   reasons: Reason[];
   uncertainty: string[];
   formulaError?: string;
@@ -189,6 +197,8 @@ export interface FeedbackView {
   artist: Record<string, number>;
   excluded: Set<string>;
   hidden: Set<string>;
+  /** REMOVE-FOREVER-001: songs the listener removed (and has not liked since), for the similarity check. */
+  removed?: RemovedSong[];
   likedArtists: Set<string>;
   events: number;
   /** ALBUM-TASTE-001 (v2 only): album key -> affinity, and the album's name for the reasons. */
@@ -216,6 +226,43 @@ export function withSavedAlbums(fb: FeedbackView, saved: readonly { key: string;
   return { ...fb, album, albumNames };
 }
 
+export interface RemovedSong { key: string; artist: string; tags: G.Tag[] }
+
+function removalsOf(hides: Map<string, FeedbackEvent>): { hidden: Set<string>; removed: RemovedSong[] } {
+  const removed = [...hides.values()].map((e) => {
+    const tags = (e.track as { tags?: unknown } | null | undefined)?.tags;
+    return { key: e.key, artist: (e.artist ?? '').toLowerCase(), tags: Array.isArray(tags) ? (tags as G.Tag[]).filter((g) => g && typeof g.name === 'string') : [] };
+  });
+  return { hidden: new Set(hides.keys()), removed };
+}
+
+/** A song this close to one the listener removed (0..1) is pushed all the way down by REMOVED_PENALTY. */
+export const REMOVED_NEAR = 0.5;
+export const REMOVED_PENALTY = 0.6;
+/** The same artist as a removed song counts as this close. */
+export const REMOVED_SAME_ARTIST = 0.9;
+
+/**
+ * REMOVE-FOREVER-001: how much of its score a candidate keeps (0.4..1) given the songs the listener removed. Closeness
+ * is the measured sound when both songs have it, else the genres; the same artist counts as REMOVED_SAME_ARTIST.
+ */
+export function removedPenalty(c: Pick<Track, 'key' | 'artists' | 'tags'>, removed: readonly RemovedSong[], vectors: Map<string, Float64Array>): number {
+  if (!removed.length) return 1;
+  const artists = new Set((c.artists ?? []).map((a) => a.toLowerCase()));
+  const vc = vectors.get(c.key);
+  let near = 0;
+  for (const r of removed) {
+    if (r.key === c.key) return 1 - REMOVED_PENALTY;
+    let s = r.artist && artists.has(r.artist) ? REMOVED_SAME_ARTIST : 0;
+    const vr = vectors.get(r.key);
+    if (vc && vr) s = Math.max(s, Math.max(0, dot(vc, vr)));
+    else if (r.tags.length && c.tags?.length) s = Math.max(s, G.similarity(r.tags, c.tags) ?? 0);
+    near = Math.max(near, s);
+  }
+  const k = Math.max(0, Math.min(1, (near - REMOVED_NEAR) / (1 - REMOVED_NEAR)));
+  return 1 - REMOVED_PENALTY * k;
+}
+
 export function decay(ts: number, nowTs: number, halfLifeDays: number): number {
   const age = Math.max(0, (nowTs - ts) / 86400.0);
   return Math.pow(0.5, age / halfLifeDays);
@@ -228,7 +275,7 @@ export function buildFeedback(events: FeedbackEvent[], nowTs: number, cfg: Engin
   const artist: Record<string, number> = {};
   const skippedByArtist = new Map<string, Set<string>>();
   const latest = new Map<string, [number, string]>();
-  const hidden = new Set<string>();
+  const hides = new Map<string, FeedbackEvent>();
   const sorted = [...events].sort((x, y) => x.ts - y.ts || (x.event_id < y.event_id ? -1 : x.event_id > y.event_id ? 1 : 0));
   for (const e of sorted) {
     if ((e.track as (typeof e.track & { kind?: string }))?.kind === 'radio-programme') continue;
@@ -238,7 +285,9 @@ export function buildFeedback(events: FeedbackEvent[], nowTs: number, cfg: Engin
     track[e.key] = (track[e.key] ?? 0) + w;
     const a = e.artist ?? '';
     if (e.kind === 'like' || e.kind === 'dislike' || e.kind === 'hide') latest.set(e.key, [e.ts, e.kind]);
-    if (e.kind === 'hide' && nowTs - e.ts < 30 * 86400) hidden.add(e.key);
+    // REMOVE-FOREVER-001: a removal (or a dislike, the Discover X) lasts until the listener likes or stars the song.
+    if (e.kind === 'hide' || e.kind === 'dislike') hides.set(e.key, e);
+    else if (e.kind === 'like' || e.kind === 'save') hides.delete(e.key);
     if (!a) continue;
     if (e.kind === 'skip') {
       if (!skippedByArtist.has(a)) skippedByArtist.set(a, new Set());
@@ -254,7 +303,8 @@ export function buildFeedback(events: FeedbackEvent[], nowTs: number, cfg: Engin
   const excluded = new Set<string>();
   for (const [k, [, kind]] of latest) if (kind === 'dislike') excluded.add(k);
   const liked = new Set(Object.keys(artist).filter((a) => artist[a]! > 1.0));
-  return { track, artist, excluded, hidden, likedArtists: liked, events: seen.size };
+  const { hidden, removed } = removalsOf(hides);
+  return { track, artist, excluded, hidden, removed, likedArtists: liked, events: seen.size };
 }
 
 /**
@@ -278,7 +328,7 @@ export function buildFeedback2(events: FeedbackEvent[], nowTs: number, cfg: Engi
   const artistNeg: Record<string, number> = {};
   const skippedByArtist = new Map<string, Set<string>>();
   const latest = new Map<string, [number, string]>();
-  const hidden = new Set<string>();
+  const hides = new Map<string, FeedbackEvent>();
   const perDay = new Map<string, number>(); // `${key}|${day}` -> behavioral events already counted
   const skipStreak = new Map<string, { n: number; ts: number }>(); // consecutive skips with no positive in between
   const albumPos = new Map<string, Map<string, number>>(); // album -> key -> best positive weight
@@ -317,7 +367,9 @@ export function buildFeedback2(events: FeedbackEvent[], nowTs: number, cfg: Engi
     track[e.key] = (track[e.key] ?? 0) + w;
     const a = e.artist ?? '';
     if (e.kind === 'like' || e.kind === 'dislike' || e.kind === 'hide') latest.set(e.key, [e.ts, e.kind]);
-    if (e.kind === 'hide' && nowTs - e.ts < 30 * 86400) hidden.add(e.key);
+    // REMOVE-FOREVER-001: a removal (or a dislike, the Discover X) lasts until the listener likes or stars the song.
+    if (e.kind === 'hide' || e.kind === 'dislike') hides.set(e.key, e);
+    else if (e.kind === 'like' || e.kind === 'save') hides.delete(e.key);
     const ak = e.track ? albumKeyOf(e.track) : null;
     if (ak) {
       albumNames[ak] ??= cleanAlbumTitle(String(e.track!.album));
@@ -375,7 +427,8 @@ export function buildFeedback2(events: FeedbackEvent[], nowTs: number, cfg: Engi
   }
   for (const k of Object.keys(album)) if (!album[k]) delete album[k];
   for (const k of Object.keys(albumNames)) if (!(k in album)) delete albumNames[k];
-  return { track, artist, excluded: excluded2, hidden, likedArtists: liked2, events: seen.size, album, albumNames };
+  const { hidden, removed } = removalsOf(hides);
+  return { track, artist, excluded: excluded2, hidden, removed, likedArtists: liked2, events: seen.size, album, albumNames };
 }
 
 /** The album part of a song's feedback, with the album's name; null when the listener has none for it. */
@@ -444,6 +497,30 @@ export interface Context {
   rankV2?: boolean;
   /** Long/recent/session taste blend (v2 only); when present it replaces `taste` in scoring. */
   taste2?: TasteBlend | null;
+  /**
+   * ARTIST-SIZE-001: how much of its score a song keeps for its artist's size against the listener's (artist-size.ts
+   * sizeFit, 0.05-1). Absent, or 1, changes nothing; it only ever lowers a score.
+   */
+  artistFit?: ((c: Track) => number | null) | undefined;
+  /**
+   * ARTIST-VARIETY-001: songs by each artist (primaryArtist) already in the queue still to play, or just heard. They
+   * count against maxPerArtist, so batch after batch cannot pile one artist up. Absent changes nothing.
+   */
+  artistLoad?: Readonly<Record<string, number>> | undefined;
+  /**
+   * DISCOVER-BREADTH-001: reserve a share of the batch for distinct artists the listener does not already know
+   * (`familiar`: starting-song artists and artists their listening already likes), but only ones that fit the
+   * listening mood: a known taste fit below `minTaste` gets no reserved slot; no taste reading counts as fit.
+   * Too few such artists and the rest fills as before. Absent changes nothing (golden parity).
+   */
+  breadth?: { familiar: ReadonlySet<string>; share: number; minTaste: number } | undefined;
+  /**
+   * GENRE-WORD-001: when set, an exploration-only pick (a genre chart or a colour ask: no service ever
+   * called it related to anything the listener plays) must show it fits the mood - a taste fit, a close
+   * sound, or a related genre - before it can enter the queue. Such a pick is held back as a last resort
+   * rather than dropped, so a run can still fill when there is nothing better. Absent changes nothing.
+   */
+  moodGate?: boolean | undefined;
 }
 
 export function dot(a: Float64Array, b: Float64Array): number {
@@ -621,9 +698,22 @@ export function scoreOne(c: Track, ctx: Context): Scored {
   }
   const have = seedW + (g.feedback !== null && g.feedback !== undefined ? covFeedback : 0.0);
   const coverage = allAff > 1e-12 ? Math.min(1, have / allAff) : 0.0;
-  const final = affinity * (cfg.coverageFloor + (1 - cfg.coverageFloor) * coverage);
+  // Unknown size is not a match: it leaves the multiplier neutral and writes no size factor.
+  const fit = ctx.artistFit ? ctx.artistFit(c) : null;
+  const sizeFit = typeof fit === 'number' && Number.isFinite(fit) ? Math.min(1, Math.max(0, fit)) : null;
+  const final = affinity * (cfg.coverageFloor + (1 - cfg.coverageFloor) * coverage) * (sizeFit ?? 1);
   const factors: Record<string, number | null> = bestKey ? { ...perSeedFactors[bestKey] } : {};
   Object.assign(factors, g);
+  if (sizeFit !== null) factors['size'] = sizeFit;
+  // DISCOVER-BREADTH-002: the best sound and genre match across every starting song. Read by the breadth gate only.
+  let bestSonic: number | null = null;
+  let bestGenre: number | null = null;
+  for (const pf of Object.values(perSeedFactors)) {
+    if (typeof pf['audio'] === 'number') bestSonic = Math.max(bestSonic ?? 0, pf['audio']);
+    if (typeof pf['genre'] === 'number') bestGenre = Math.max(bestGenre ?? 0, pf['genre']);
+  }
+  if (bestSonic !== null) factors['sonicFit'] = bestSonic;
+  if (bestGenre !== null) factors['genreFit'] = bestGenre;
   let weightsUsed: Record<string, number>;
   if (bestKey) {
     weightsUsed = { ...perSeedWs[bestKey] };
@@ -658,7 +748,12 @@ export function scoreAll(candidates: Track[], ctx: Context): Scored[] {
   for (const c of candidates) {
     if (seedKeys.has(c.key) || ctx.feedback.excluded.has(c.key) || ctx.feedback.hidden.has(c.key)) continue;
     if (c.unavailable) continue;
-    out.push(scoreOne(c, ctx));
+    const s = scoreOne(c, ctx);
+    // REMOVE-FOREVER-001 (v2): songs like one the listener removed sink; the parity path is unchanged.
+    const removed = ctx.rankV2 ? ctx.feedback.removed ?? [] : [];
+    const keep = removed.length ? removedPenalty(c, removed, ctx.vectors) : 1;
+    if (keep < 1) { s.final *= keep; s.removedNear = true; }
+    out.push(s);
   }
   out.sort((x, y) => y.final - x.final || (x.track.key < y.track.key ? -1 : x.track.key > y.track.key ? 1 : 0));
   assignTiers(out, ctx);
@@ -668,6 +763,7 @@ export function scoreAll(candidates: Track[], ctx: Context): Scored[] {
       if (s.formulaError) uncertainty.push(`Custom formula could not score this song; built-in score used: ${s.formulaError}`);
       else reasons.unshift({ factor: 'formula', text: 'Ranked with your custom discovery formula. Built-in factor weights are reference values.', weight: 1 });
     }
+    if (s.removedNear) uncertainty.push('Lowered: close to a song you removed.');
     s.reasons = reasons;
     s.uncertainty = uncertainty;
   }
@@ -714,6 +810,18 @@ function sim(a: Scored, b: Scored, vectors: Map<string, Float64Array>): number {
   return 0.0;
 }
 
+/**
+ * DISCOVER-BREADTH-002: a reserved new-artist slot needs the mood (taste not known-off, sound not known-wrong) and at
+ * least one positive signal: a close size, a related genre, or a close sound. Unknown is never a match.
+ */
+export const BREADTH_SIZE_CLOSE = 0.6;
+export const BREADTH_GENRE_CLOSE = 0.4;
+export const BREADTH_SONIC_CLOSE = 0.5;
+export const BREADTH_SONIC_FLOOR = 0.2;
+/** GENRE-WORD-001: what an exploration-only pick must show to enter the queue ahead of the held-back ones. */
+export const MOOD_GATE_TASTE = 0.45;
+export const MOOD_GATE_SONIC = 0.45;
+
 /** Selection keeps soft tier quotas, at most maxPerArtist per artist, seed coverage and an MMR-style penalty. */
 export function select(scored: Scored[], ctx: Context): Scored[] {
   const cfg = ctx.cfg ?? DEFAULT_ENGINE;
@@ -726,7 +834,7 @@ export function select(scored: Scored[], ctx: Context): Scored[] {
     pools[k]!.sort((x, y) => y.final - y.exposurePenalty - (x.final - x.exposurePenalty) || (x.track.key < y.track.key ? -1 : x.track.key > y.track.key ? 1 : 0));
   }
   const chosen: Scored[] = [];
-  const perArtist: Record<string, number> = {};
+  const perArtist: Record<string, number> = { ...(ctx.artistLoad ?? {}) };
   const perSeed: Record<string, number> = {};
   const seeds = ctx.seeds.map((s) => s.key);
   const emphOf = (s: Track) => Math.max(0.1, Number(s.emphasis ?? 1.0));
@@ -736,7 +844,96 @@ export function select(scored: Scored[], ctx: Context): Scored[] {
   const filled: Record<string, number> = {};
   for (const k of Object.keys(shares)) filled[k] = 0;
   const lam = 0.06 + 0.06 * Math.min(1.0, 2 * ctx.settings.adventurous);
+  const valOf = (s: Scored): number => {
+    let val = s.final - s.exposurePenalty;
+    if (chosen.length) {
+      const recent = chosen.slice(-6);
+      val -= lam * Math.max(...recent.map((r) => sim(s, r, ctx.vectors)));
+    }
+    if (s.bestSeed && seeds.length > 1) {
+      const expected = (seedShare[s.bestSeed] ?? 0) * (chosen.length + 1);
+      val += 0.06 * Math.max(-1.0, Math.min(1.0, expected - (perSeed[s.bestSeed] ?? 0)));
+    }
+    if (ctx.settings.fresh && s.newRelease) val += 0.15;
+    return val;
+  };
+  const br = ctx.breadth;
+  /**
+   * GENRE-WORD-001: an exploration pick with no sign it suits the listener is held back. "No sign" means
+   * no taste fit, no close sound and no related genre - which is exactly what a song that merely carried
+   * the genre word in its title looked like once the word search that found it was gone.
+   */
+  const heldBack: Scored[] = [];
+  if (ctx.moodGate) {
+    const fits = (s: Scored): boolean => {
+      if (s.tier !== 'experimental') return true;
+      const f = s.factors;
+      const t = f['taste'], sonic = f['sonicFit'], genre = f['genreFit'];
+      if (typeof t === 'number' && Number.isFinite(t) && t < MOOD_GATE_TASTE) return false;
+      if (typeof sonic === 'number' && sonic < BREADTH_SONIC_FLOOR) return false;
+      return (typeof t === 'number' && t >= MOOD_GATE_TASTE)
+        || (typeof sonic === 'number' && sonic >= MOOD_GATE_SONIC)
+        || (typeof genre === 'number' && genre >= BREADTH_GENRE_CLOSE);
+    };
+    for (const tier of Object.keys(pools)) {
+      const keep: Scored[] = [];
+      for (const s of pools[tier] ?? []) (fits(s) ? keep : heldBack).push(s);
+      pools[tier] = keep;
+    }
+  }
+  const newArtists = new Set<string>();
+  /** Fits the mood and has one positive size, genre or sound signal (see BREADTH_* above). */
+  const onMood = (s: Scored): boolean => {
+    if (!br) return false;
+    const f = s.factors;
+    const t = f['taste'], size = f['size'], genre = f['genreFit'], sonic = f['sonicFit'];
+    if (typeof t === 'number' && Number.isFinite(t) && t < br.minTaste) return false;
+    if (typeof sonic === 'number' && sonic < BREADTH_SONIC_FLOOR) return false;
+    return (typeof size === 'number' && size >= BREADTH_SIZE_CLOSE)
+      || (typeof genre === 'number' && genre >= BREADTH_GENRE_CLOSE)
+      || (typeof sonic === 'number' && sonic >= BREADTH_SONIC_CLOSE);
+  };
+  /** Small graded preference among qualified reserved picks; unknown signals add nothing. */
+  const breadthBonus = (s: Scored): number => {
+    const f = s.factors;
+    const n = (x: number | null | undefined) => (typeof x === 'number' && Number.isFinite(x) ? x : 0);
+    return 0.05 * n(f['size']) + 0.05 * n(f['genreFit']) + 0.05 * n(f['sonicFit']);
+  };
+  const breadthPick = (): [string, Scored] | null => {
+    if (!br) return null;
+    if (newArtists.size >= Math.floor(br.share * (chosen.length + 1))) return null;
+    let best: [string, Scored] | null = null;
+    let bestVal = -1e9;
+    for (const tier of Object.keys(pools)) {
+      for (const s of pools[tier] ?? []) {
+        const pa = primaryArtist(s.track);
+        if (!pa || br.familiar.has(pa) || newArtists.has(pa)) continue;
+        if ((perArtist[pa] ?? 0) >= cfg.maxPerArtist) continue;
+        if (s.removedNear) continue;
+        if (!onMood(s)) continue; // known off-mood: no reserved slot
+        const val = valOf(s) + breadthBonus(s);
+        if (best === null || val > bestVal || (val === bestVal && s.track.key < best[1].track.key)) {
+          best = [tier, s];
+          bestVal = val;
+        }
+      }
+    }
+    return best;
+  };
   while (chosen.length < n) {
+    // DISCOVER-BREADTH-001: a reserved slot for a new, on-mood artist comes first while the batch is short of them.
+    const reserved = breadthPick();
+    if (reserved) {
+      const [tier, s] = reserved;
+      pools[tier] = (pools[tier] ?? []).filter((x) => x !== s);
+      chosen.push(s);
+      filled[tier] = (filled[tier] ?? 0) + 1;
+      const pa = primaryArtist(s.track);
+      perArtist[pa] = (perArtist[pa] ?? 0) + 1;
+      newArtists.add(pa);
+      if (s.bestSeed) perSeed[s.bestSeed] = (perSeed[s.bestSeed] ?? 0) + 1;
+      continue;
+    }
     // tier with the largest deficit that still has an eligible item
     const order = Object.keys(shares).sort((a, b) => {
       const da = -(shares[a]! * (chosen.length + 1) - filled[a]!);
@@ -750,16 +947,7 @@ export function select(scored: Scored[], ctx: Context): Scored[] {
       for (const s of pools[tier] ?? []) {
         const pa = primaryArtist(s.track);
         if ((perArtist[pa] ?? 0) >= cfg.maxPerArtist) continue;
-        let val = s.final - s.exposurePenalty;
-        if (chosen.length) {
-          const recent = chosen.slice(-6);
-          val -= lam * Math.max(...recent.map((r) => sim(s, r, ctx.vectors)));
-        }
-        if (s.bestSeed && seeds.length > 1) {
-          const expected = (seedShare[s.bestSeed] ?? 0) * (chosen.length + 1);
-          val += 0.06 * Math.max(-1.0, Math.min(1.0, expected - (perSeed[s.bestSeed] ?? 0)));
-        }
-        if (ctx.settings.fresh && s.newRelease) val += 0.15;
+        const val = valOf(s);
         if (val > bestVal || (val === bestVal && best !== null && s.track.key < best.track.key)) {
           best = s;
           bestVal = val;
@@ -777,7 +965,63 @@ export function select(scored: Scored[], ctx: Context): Scored[] {
     filled[tier] = (filled[tier] ?? 0) + 1;
     const pa = primaryArtist(s.track);
     perArtist[pa] = (perArtist[pa] ?? 0) + 1;
+    // Only an on-mood new artist counts toward the share; an off-mood one picked on score does not fill it.
+    if (br && pa && !br.familiar.has(pa) && !s.removedNear && onMood(s)) newArtists.add(pa);
     if (s.bestSeed) perSeed[s.bestSeed] = (perSeed[s.bestSeed] ?? 0) + 1;
+  }
+  // A short batch takes the held-back exploration picks rather than leaving the listener with nothing.
+  if (chosen.length < n && heldBack.length) {
+    for (const s of heldBack.sort((a, b) => b.final - a.final)) {
+      if (chosen.length >= n) break;
+      const pa = primaryArtist(s.track);
+      if (pa && (perArtist[pa] ?? 0) >= cfg.maxPerArtist) continue;
+      chosen.push(s);
+      if (pa) perArtist[pa] = (perArtist[pa] ?? 0) + 1;
+    }
+  }
+  return chosen;
+}
+
+/**
+ * WP1 (plan 2026-11-24, A1/A4): order EVERY scored row for a re-rank of the existing queue. Same per-pick value as
+ * `select` (final - exposure - similarity to the last six + seed balance + fresh bonus) but no tier quotas, no
+ * per-artist cap and no early exit, so a re-rank can reorder the queue without dropping any of its songs.
+ * `select` itself is untouched (golden parity).
+ */
+export function orderAll(scored: Scored[], ctx: Context): Scored[] {
+  const left = [...scored];
+  const chosen: Scored[] = [];
+  const perSeed: Record<string, number> = {};
+  const seeds = ctx.seeds.map((s) => s.key);
+  const emphOf = (s: Track) => Math.max(0.1, Number(s.emphasis ?? 1.0));
+  const emphTotal = ctx.seeds.reduce((x, s) => x + emphOf(s), 0) || 1.0;
+  const seedShare: Record<string, number> = {};
+  for (const s of ctx.seeds) seedShare[s.key] = emphOf(s) / emphTotal;
+  const lam = 0.06 + 0.06 * Math.min(1.0, 2 * ctx.settings.adventurous);
+  while (left.length) {
+    // WP4 (M3): skip a row whose primary artist is one of the last two picked while another artist is available.
+    const lastTwo = chosen.slice(-2).map((r) => primaryArtist(r.track));
+    const spaced = left.some((s) => !tooClose(lastTwo, primaryArtist(s.track), 2));
+    let bi = -1;
+    let bestVal = -Infinity;
+    for (let i = 0; i < left.length; i++) {
+      const s = left[i]!;
+      if (spaced && tooClose(lastTwo, primaryArtist(s.track), 2)) continue;
+      let val = s.final - s.exposurePenalty;
+      if (chosen.length) val -= lam * Math.max(...chosen.slice(-6).map((r) => sim(s, r, ctx.vectors)));
+      if (s.bestSeed && seeds.length > 1) {
+        const expected = (seedShare[s.bestSeed] ?? 0) * (chosen.length + 1);
+        val += 0.06 * Math.max(-1.0, Math.min(1.0, expected - (perSeed[s.bestSeed] ?? 0)));
+      }
+      if (ctx.settings.fresh && s.newRelease) val += 0.15;
+      if (bi < 0 || val > bestVal || (val === bestVal && s.track.key < left[bi]!.track.key)) {
+        bi = i;
+        bestVal = val;
+      }
+    }
+    const [s] = left.splice(bi, 1);
+    chosen.push(s!);
+    if (s!.bestSeed) perSeed[s!.bestSeed] = (perSeed[s!.bestSeed] ?? 0) + 1;
   }
   return chosen;
 }
