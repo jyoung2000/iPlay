@@ -1295,6 +1295,23 @@ export function App() {
    * the engine lists what it did (`pending`): each song it finished or skipped teaches taste by the
    * same rules a watched song does, and the page then follows the song the engine is on now.
    */
+  const restoreRef = useRef<{ id: string; mediaId: string } | null>(null);
+  /** COLD-RESTORE-001: show the song the engine restored, paused, in the list it was playing from. Never plays it. */
+  const adoptRestored = () => {
+    const r = restoreRef.current;
+    if (!r) return;
+    if (playing) { if (playing.track.key === r.id) restoreRef.current = null; return; }
+    const scoped = decodePlaylistMediaId(r.mediaId);
+    const list = scoped && scoped.listId !== PHONE_LIST ? lists.find((l) => l.id === scoped.listId) : undefined;
+    const fromList = list ? savedTracks(saved, lists, list.id).find((t) => t.key === r.id) : undefined;
+    const row = activeItems.find((x) => x.track.key === r.id)
+      ?? (() => { const t = fromList ?? trackById(r.id); return t ? playbackRows([t])[0] : undefined; })();
+    if (!row) return;
+    restoreRef.current = null;
+    if (list && fromList) { playingListRef.current = list.id; enterPlayingContext(list.id); }
+    setPlaying({ track: row.track, playback: row.playback });
+    setFocusKey(row.track.key);
+  };
   const engineSync = useRef<(st: Parameters<Parameters<typeof subscribeEngineState>[0]>[0]) => void>(() => undefined);
   useEffect(() => {
     engineSync.current = (st) => {
@@ -1312,9 +1329,20 @@ export function App() {
           });
         }
       }
-      if (st.pending && st.id && st.id !== playingKey) playById(st.mediaId ?? st.id);
+      if (st.pending && st.id && st.id !== playingKey) {
+        // COLD-RESTORE-001: a queue the service put back paused is SHOWN, never played: no load, no count.
+        if (!st.playWhenReady && !playing) { restoreRef.current = { id: st.id, mediaId: st.mediaId ?? st.id }; adoptRestored(); }
+        else playById(st.mediaId ?? st.id);
+      }
     };
   });
+  // COLD-RESTORE-001: the engine usually answers `hello` before this page's queue has loaded, so the restored song
+  // waits here and is shown as soon as the queue or the lists can name it. A song the listener starts first wins.
+  useEffect(() => {
+    if (!restoreRef.current) return;
+    if (playing && playing.track.key !== restoreRef.current.id) { restoreRef.current = null; return; }
+    adoptRestored();
+  }, [activeItems, lists, saved, playingKey]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!engineAvailable()) return;
     const off = subscribeEngineState((st) => engineSync.current(st));
