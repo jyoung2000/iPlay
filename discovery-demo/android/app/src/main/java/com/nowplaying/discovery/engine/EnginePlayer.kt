@@ -164,6 +164,9 @@ class EnginePlayer(
   private val repeatSync = RepeatSync()
   private var repeatFromPage = false
   private var playWhenReady = false
+  /** Wall-clock ms audio last stopped (0 while it plays or never stopped); a long gap starts a new session. */
+  private var idleSince = 0L
+  private fun savedAtMs(): Long = NativeStateCodec.stopTimeToSave(idleSince, System.currentTimeMillis())
   private var ended = false
   private var error: PlaybackException? = null
   /** Bumped whenever the current song changes, so a slow open for an old song is dropped. */
@@ -246,6 +249,8 @@ class EnginePlayer(
    */
   fun pageLoad(song: MediaHub.Song, mediaId: String?, positionMs: Long, play: Boolean, pageRev: Int) {
     leaveRadio()
+    // CAR-SKIP-003: the page answered (a forwarded press, or a choice of its own); the queue's fallback stands down.
+    pageLoads++
     val id = mediaId ?: song.id
     val current = queue.current
     Log.i(TAG, "page load ${song.id.take(60)} link=${song.source != null} play=$play rev=$pageRev/$rev")
@@ -388,7 +393,7 @@ class EnginePlayer(
 
   /** NATIVE-COLD-STATE-001: the queue, its shuffle round and the native millisecond position, to save. */
   fun nativeState(): JSONObject = NativeStateCodec.nativeJson(
-    NativeStateCodec.NativeQueue(queue.items.map { it.mediaId to it.song }, queue.control(), positionMs(engine.snapshot)),
+    NativeStateCodec.NativeQueue(queue.items.map { it.mediaId to it.song }, queue.control(), positionMs(engine.snapshot), savedAtMs()),
   )
 
   /**
@@ -400,9 +405,14 @@ class EnginePlayer(
     if (queue.items.isNotEmpty() || loadedKey != null || waitingFor != null) return false
     val q = NativeStateCodec.nativeOf(saved, sourceAllowed)?.takeIf { it.entries.isNotEmpty() } ?: return false
     queue.restore(q.entries.map { (m, s) -> Entry(s, m) }, q.control)
+    // SESSION-PLAYED-001: a restore long after the audio stopped is a new session.
+    val now = System.currentTimeMillis()
+    if (NativeStateCodec.isNewSession(q.savedAtMs, now)) queue.newSession()
+    idleSince = q.savedAtMs
     engine.setRepeatOne(queue.repeatsSong)
+    // SESSION-RESET-001: a new session opens the song paused at its beginning, not where it stopped.
     playWhenReady = false
-    pendingStartMs = q.positionMs
+    pendingStartMs = NativeStateCodec.restorePositionMs(q.savedAtMs, q.positionMs, now)
     ended = false
     error = null
     restored = true
@@ -420,9 +430,39 @@ class EnginePlayer(
     return md.buildUpon().setArtworkData(RadioArt.bytes(context), MediaMetadata.PICTURE_TYPE_FRONT_COVER).build()
   }
 
+  /**
+   * CAR-SKIP-002: the order the session publishes. Shuffled, that is the round's play order
+   * ([PlayQueue.roundTimeline]), so Android Auto sees a window after the song playing exactly while
+   * this app can really move on. In the list's own order (shuffle off) the list is the play order
+   * already, and the car shows the queue as the listener wrote it.
+   *
+   * CAR-SKIP-003: with the round played through, a press is still answerable — the mood top-up finds
+   * more songs and plays the first one — so one window stays published rather than letting the car
+   * decide for itself that this app is finished. [answerable] is that promise, and nothing else.
+   */
+  private fun shownOrder(): List<Int> =
+    if (queue.shuffle && !radioLive) queue.roundTimeline(::canFetch, keepNext = answerable())
+    // Shuffle off, the list IS the play order and the car shows it as the listener wrote it; the car
+    // only runs out of a next window on the list's very last row, which is not what hours of Discover
+    // listening reaches (Discover shuffles). Re-ordering it here would move played songs above the
+    // song playing, so the list is published untouched.
+    else queue.items.indices.toList()
+
+  /**
+   * CAR-SKIP-003: whether a Next press this app cannot play from the queue can still be answered by
+   * finding more songs (AA-NEXT-DRY-001). Only then may the published timeline promise the car a
+   * window it has no song for yet. With a live page the promise is kept by the fallback in [skip]:
+   * a press the page does not answer is answered by the queue, top-up included.
+   */
+  private fun answerable(): Boolean = !radioLive && onQueueDry != null && queue.items.size > 1
+
   override fun getState(): State {
     val snap = engine.snapshot
-    val playlist = queue.items.mapIndexed { i, e ->
+    val shown = shownOrder()
+    val playlist = shown.map { i ->
+      val e = queue.items[i]
+      // The uid stays the song's place in the queue, not its place in this order, so a reshuffle
+      // of what is published does not read as a different song to the controller.
       MediaItemData.Builder("${e.mediaId}#$i")
         .setMediaItem(MediaItem.Builder().setMediaId(e.mediaId).setMediaMetadata(nowPlayingMetadata(e.song)).build())
         .setMediaMetadata(nowPlayingMetadata(e.song))
@@ -440,7 +480,7 @@ class EnginePlayer(
       .setPlayerError(error)
       .setPlayWhenReady(playWhenReady, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
       .setPlaylist(playlist)
-      .setCurrentMediaItemIndex(queue.index.coerceAtLeast(0))
+      .setCurrentMediaItemIndex(shown.indexOf(queue.index).let { if (it >= 0) it else 0 })
       // CAR-RADIO-CLOCK-002: live radio with no known song start has no clock; a running count from zero would be invented.
       .setContentPositionMs(if (playing && !(radioLive && radioStartMs == null)) PositionSupplier.getExtrapolating(positionMs, 1f) else PositionSupplier.getConstant(positionMs))
       .setShuffleModeEnabled(if (radioLive) com.nowplaying.discovery.RadioNative.shuffle else queue.shuffle)
@@ -532,7 +572,9 @@ class EnginePlayer(
    * playing, which carries on. A live page owns the queue and sends its own list, so nothing here.
    */
   fun appendFound(songs: List<MediaHub.Song>): Int {
-    if (pageLive) return 0
+    // CAR-SKIP-003: a press the page did not answer became the queue's own (it owes a Next), so the songs found for it
+    // must reach the queue even with the page live — otherwise that press is dropped after all.
+    if (pageLive && owedNextFrom == null) return 0
     val have = queue.items.map { it.mediaId }.toSet()
     val add = songs.filter { it.id !in have }.map { Entry(MediaHub.sourced(it)) }
     if (add.isEmpty()) return 0
@@ -671,9 +713,12 @@ class EnginePlayer(
         if (seekCommand == Player.COMMAND_SEEK_TO_PREVIOUS && at > RESTART_THRESHOLD_MS) pageSeek(0) else skip(forward = false)
       }
       Player.COMMAND_SEEK_TO_MEDIA_ITEM -> {
-        val entry = queue.items.getOrNull(mediaItemIndex)
+        // CAR-SKIP-002: the controller names a row of the order this session published, which under
+        // shuffle is the round's play order, so it is mapped back to the song's place in the queue.
+        val at = shownOrder().getOrNull(mediaItemIndex) ?: mediaItemIndex
+        val entry = queue.items.getOrNull(at)
         if (entry != null && pageLive) page?.command(JSONObject().put("type", "playId").put("id", entry.mediaId))
-        else if (queue.select(mediaItemIndex)) { nativeChange(); loadCurrent(positionMs.coerceAtLeast(0), chosen = true) }
+        else if (queue.select(at)) { nativeChange(); loadCurrent(positionMs.coerceAtLeast(0), chosen = true) }
       }
       else -> pageSeek(positionMs)
     }
@@ -724,6 +769,9 @@ class EnginePlayer(
     if (!play) owedNextFrom = null
     if (play && !requestFocus()) return
     // Car, lock-screen, focus and noisy-device controls share the phone radio pause state.
+    // SESSION-PLAYED-001: audio stopped longer than the session window ends the session; playing again starts a new one.
+    if (!play) { if (idleSince == 0L) idleSince = System.currentTimeMillis() } // a repeated pause keeps the first stop time
+    else { if (NativeStateCodec.isNewSession(idleSince, System.currentTimeMillis())) queue.newSession(); idleSince = 0L }
     if (radioLive) com.nowplaying.discovery.RadioNative.session?.paused = !play
     playWhenReady = play
     if (play) {
@@ -737,7 +785,35 @@ class EnginePlayer(
 
   /** Next/Previous from a controller: the page's call while it is awake, the queue's otherwise. */
   private fun skip(forward: Boolean) {
-    if (pageLive) { page?.command(JSONObject().put("type", if (forward) "next" else "prev")); return }
+    if (pageLive) {
+      // CAR-SKIP-003 (owner, 2026-11-28): "ensure the skip button always works on android auto". Forwarding the press
+      // to the page is a hand-off with no answer owed: a page whose own round is all heard, whose top-up is stuck, or
+      // whose script is wedged simply drops it, and the car's Next looks broken. So the press is remembered, and if
+      // the page has neither loaded a song nor changed the queue by [PAGE_PRESS_MS], the queue answers it instead —
+      // including the mood top-up when the queue has nothing left either.
+      val turn = ++pagePress
+      val from = queue.current?.song?.id
+      val version = queue.version
+      val loads = pageLoads
+      page?.command(JSONObject().put("type", if (forward) "next" else "prev"))
+      main.postDelayed({
+        if (turn != pagePress) return@postDelayed // a newer press owns the answer
+        if (pageLoads != loads || queue.version != version || queue.current?.song?.id != from) return@postDelayed
+        Log.i(TAG, "${if (forward) "next" else "prev"}: the page did not answer ${from?.take(60)} in ${PAGE_PRESS_MS}ms; the queue answers it")
+        queueSkip(forward)
+      }, PAGE_PRESS_MS)
+      return
+    }
+    queueSkip(forward)
+  }
+
+  /** CAR-SKIP-003: how long a press forwarded to the page may go unanswered before the queue answers it. */
+  private var pagePress = 0
+  /** CAR-SKIP-003: counts the songs the page asked for, so an answered press can be told from a dropped one. */
+  private var pageLoads = 0
+
+  /** The queue's own answer to a Next/Previous press. */
+  private fun queueSkip(forward: Boolean) {
     val from = queue.current?.song?.id
     val heard = heardNow()
     val cued = cue?.takeIf { forward && cueFor == from }
@@ -751,8 +827,8 @@ class EnginePlayer(
     if (fetching) moved = true
     if (!moved) {
       // SHUFFLE-STAY-001: say why a press found nothing, so a stalled car Next can be told from a missing file.
-      if (forward) Log.i(TAG, "next: nothing to follow ${from?.take(60)} at ${queue.index} (shuffle=${queue.shuffle}, once=${queue.playsOnce}, repeat=${queue.repeat}) " +
-        queue.items.joinToString { "${it.song.id.take(40)}[r=${it.song.ready},h=${it.song.heard},s=${it.song.source != null}]" })
+      if (forward) Log.i(TAG, "next: nothing to follow ${from?.take(60)} at ${queue.index} (shuffle=${queue.shuffle}, playsOnce=${queue.playsOnce}, repeat=${queue.repeat}) " +
+        queue.stallSummary())
       // AA-NEXT-DRY-001: nothing unheard is left at all. Find more for the listening mood; the first found song is
       // this press's answer (appendFound moves on to it), so Next is never silently dead.
       if (forward && onQueueDry != null) { owedNextFrom = from; onQueueDry?.invoke() }
@@ -887,8 +963,8 @@ class EnginePlayer(
             emit(null)
             return@post
           }
-          // Reached by advancing and not on the phone: skip it, as the page does.
-          if (queue.advance(pressed = true) != null && queue.current?.song?.id != song.id) {
+          // Reached by advancing and not on the phone: skip it, as the page does. Automatic, so it never opens a new round.
+          if (queue.advance(pressed = false) != null && queue.current?.song?.id != song.id) {
             Log.i(TAG, "not on the phone, skipped: ${song.id.take(60)} -> ${queue.current?.song?.id?.take(60)} at ${queue.index}")
             nativeChange(); loadCurrent(0, chosen = false)
           }
@@ -1236,6 +1312,12 @@ class EnginePlayer(
     private const val MAX_LOG = 64
     /** Renewed on every play; a safety net, not a playback limit. */
     private const val WAKE_TIMEOUT_MS = 6 * 60 * 60 * 1000L
+    /**
+     * CAR-SKIP-003: how long a Next/Previous press forwarded to the page may go unanswered before the queue answers
+     * it. Long enough that a page choosing and opening a song is never overruled (its own load lands first), short
+     * enough that the car's button never feels dead.
+     */
+    private const val PAGE_PRESS_MS = 1200L
     private val COMMANDS = Player.Commands.Builder()
       .addAll(
         Player.COMMAND_PLAY_PAUSE,

@@ -44,9 +44,19 @@ class PlayQueue<T>(
   /** ARTIST-RUN-001: the artists (artistKey) of the last songs made current, oldest first. */
   private val playedArtists = ArrayDeque<String>()
   private var lastPlayedKey: String? = null
+  /**
+   * SESSION-PLAYED-001 (owner, 2026-11-28): every song made current since this queue began, across rounds. The round's
+   * heard set resets each round and the page's heard-before marks are history, so neither says what actually played.
+   * A new round, and the fallback fetch, prefer songs outside this set before any repeat.
+   */
+  private val sessionPlayed = LinkedHashSet<String>() // insertion order, so a bounded save keeps the newest
+  private fun fresh(i: Int): Boolean = identityOf(items[i]) !in sessionPlayed
+  /** The candidates not yet played this session, or all of them once every one has played. */
+  private fun preferFresh(indices: List<Int>): List<Int> = indices.filter { fresh(it) }.ifEmpty { indices }
   private fun played(i: Int) {
     // One song is one play, however many paths (set, select, advance) make it current.
     val key = identityOf(items[i])
+    sessionPlayed += key
     if (key == lastPlayedKey) return
     lastPlayedKey = key
     playedArtists.addLast(artistKey(artistOf(items[i])))
@@ -126,11 +136,36 @@ class PlayQueue<T>(
     val order: List<String>,
     val nextRound: List<String>,
     val heard: List<String>,
+    /** SESSION-PLAYED-001: every song played since the queue began, across rounds, oldest first. Absent in older saves. */
+    val played: List<String> = emptyList(),
   )
+
+  /**
+   * Counts only, for a stalled Next: the log truncates long item lists, so these say why nothing is open.
+   * open = playable and not yet played this round (the set findNext draws from).
+   */
+  fun stallSummary(): String {
+    val playable = items.indices.count { isPlayable(items[it]) }
+    val open = items.indices.count { isPlayable(items[it]) && !playedThisRound(it) }
+    val inHeard = items.indices.count { identityOf(items[it]) in heard }
+    val held = if (firstRound) items.indices.count { heardBefore(items[it]) } else 0
+    val inOrder = order.toHashSet().size
+    return "items=${items.size} playable=$playable open=$open inHeard=$inHeard heldByHeardBefore=$held " +
+      "firstRound=$firstRound orderDistinct=$inOrder nextRound=${nextRound.size} heard=${heard.size}"
+  }
+
+  /** SESSION-PLAYED-001: a new listening session forgets what played before; the song now current counts as its first. */
+  fun newSession() {
+    sessionPlayed.clear()
+    heard.clear()
+    current?.let { sessionPlayed += identityOf(it); heard += identityOf(it) }
+    version++
+  }
 
   fun control(): Control = Control(
     index, repeat, shuffle,
     order.map { identityOf(items[it]) }, nextRound.map { identityOf(items[it]) }, heard.toList(),
+    sessionPlayed.toList(),
   )
 
   /**
@@ -158,6 +193,55 @@ class PlayQueue<T>(
     nextRound = if (c.shuffle) remap(c.nextRound) else items.indices.toList()
     heard += c.heard
     current?.let { heard += identityOf(it) }
+    // SESSION-PLAYED-001: songs played in earlier rounds stay played after a restart. An older save has no played
+    // list, so its round's heard keys are the most that is known.
+    sessionPlayed.clear()
+    sessionPlayed += c.played
+    sessionPlayed += heard
+  }
+
+  /**
+   * CAR-SKIP-002 (owner, 2026-11-28: "the skip button on android auto does not work after a while").
+   *
+   * The round as a timeline: the songs already behind the listener, the song playing, then the songs
+   * a press can still reach, in the order the round will reach them. Android Auto is a Media3
+   * controller and works out for itself whether a next song exists, from the published timeline
+   * alone — [androidx.media3.common.BasePlayer.seekToNext] then drops the press before this app ever
+   * sees it. Published in the list's own order, a shuffled round whose song happens to sit on the
+   * last row therefore looks finished, and the car's Next goes dead while songs are still unplayed.
+   *
+   * So the published order must BE the play order. A song is "still reachable" by exactly the test
+   * [findNext] applies, plus [canFollow] for one that is not on the phone yet but can still be
+   * streamed ([advanceFetchable]); everything else sits behind the song playing, where it cannot
+   * promise the car a next song this round has no intention of playing.
+   */
+  fun roundTimeline(canFollow: (T) -> Boolean = { false }, keepNext: Boolean = false): List<Int> {
+    val at = index
+    val drawn = order.filter { it in items.indices }
+    val seen = drawn.toHashSet()
+    val all = drawn + items.indices.filter { it !in seen }
+    // Same rule as findNext's open list (playedThisRound covers both the round's heard set and the
+    // first-round heard-before marks), so the published timeline can never offer a next findNext refuses.
+    fun reachable(i: Int) = i != at &&
+      !playedThisRound(i) &&
+      (isPlayable(items[i]) || canFollow(items[i]))
+    val reach = all.filter(::reachable)
+    // Songs not yet played this session come first, the order findNext plays them in.
+    val ahead = (reach.filter { fresh(it) } + reach.filter { !fresh(it) }).toMutableList()
+    // CAR-SKIP-003 (owner, 2026-11-28): "ensure the skip button always works on android auto ... after hours of
+    // listening on discover the skip button no longer works". With every song of the round played, nothing is ahead
+    // and the car drops Next itself, for good. The app can still answer that press — it finds more songs for the
+    // listening mood and plays the first one (AA-NEXT-DRY-001) — so while a caller can answer, one window stays
+    // published after the song playing. It changes nothing about what plays automatically ([findNext] is untouched):
+    // the window is the song a fresh round would open with, so the car's queue view stays truthful.
+    if (keepNext && ahead.isEmpty() && at in items.indices) {
+      val window = peekAfterEnd()?.takeIf { it != at }
+        ?: all.firstOrNull { it != at && (isPlayable(items[it]) || canFollow(items[it])) }
+      if (window != null) ahead += window
+    }
+    val aheadSet = ahead.toHashSet()
+    val behind = all.filter { it != at && it !in aheadSet }
+    return if (at in items.indices) behind + at + ahead else behind + ahead
   }
 
   /** This round's play order (indices into [items]); under shuffle the current song comes first. */
@@ -176,6 +260,8 @@ class PlayQueue<T>(
     val oldNext = nextRound.map { identityOf(old[it]) }
     version++
     this.items = items
+    // A different queue starts its own history; the same list keeps what it played across rounds.
+    if (items.isEmpty() || old.isEmpty() || !sameList(old, items)) sessionPlayed.clear()
     index = if (items.isEmpty()) -1 else startIndex.coerceIn(0, items.size - 1)
     if (index >= 0) played(index)
     if (oldKey != null && current?.let(identityOf) != oldKey && (repeat == Repeat.ONCE || repeat == Repeat.TWICE)) repeat = Repeat.OFF
@@ -273,7 +359,7 @@ class PlayQueue<T>(
   fun peekAfterEnd(): Int? = if (repeatsSong && index >= 0) index else findNext(repeat == Repeat.ALL)?.first
 
   /** The listener pressed Next: always moves on, including under song repeat. */
-  fun peekNextPressed(): Int? = findNext(wrap = true)?.first
+  fun peekNextPressed(): Int? = findNext(wrap = true, manual = true)?.first
 
   /** The previous playable song of this round, or null at its start. */
   fun peekPrevious(): Int? {
@@ -285,7 +371,7 @@ class PlayQueue<T>(
   /** Commit what [peekAfterEnd] ([pressed] false) or [peekNextPressed] ([pressed] true) said. */
   fun advance(pressed: Boolean): Int? {
     if (!pressed && repeatsSong && index >= 0) { consumeRepeat(); return index }
-    val (i, wrapped) = findNext(wrap = pressed || repeat == Repeat.ALL) ?: return null
+    val (i, wrapped) = findNext(wrap = pressed || repeat == Repeat.ALL, manual = pressed) ?: return null
     if (pressed && i != index && (repeat == Repeat.ONCE || repeat == Repeat.TWICE)) repeat = Repeat.OFF
     if (wrapped) commitRound(i)
     index = i
@@ -307,7 +393,7 @@ class PlayQueue<T>(
     if (items.isEmpty()) return null
     val ahead = if (shuffle) order.filter { it != index && !playedThisRound(it) }
       else order.indexOf(index).let { pos -> (pos + 1 until order.size).map { order[it] } }
-    val open = ahead.filter { it in items.indices && canFetch(items[it]) }
+    val open = ahead.filter { it in items.indices && canFetch(items[it]) }.let { if (shuffle) preferFresh(it) else it }
     val run = if (once) runArtist() else ""
     val i = open.firstOrNull { run.isEmpty() || artistKey(artistOf(items[it])) != run } ?: open.firstOrNull() ?: return null
     if (i != index && (repeat == Repeat.ONCE || repeat == Repeat.TWICE)) repeat = Repeat.OFF
@@ -334,7 +420,9 @@ class PlayQueue<T>(
     // answer than staying on a song the listener just turned down. A page "heard before" mark still holds:
     // those songs the owner asked never to come back in the first round.
     fun again(i: Int) = i != at && !avoid(items[i]) && !(firstRound && heardBefore(items[i]))
-    val after = (1 until items.size).map { (at + it) % items.size }
+    val after = (1 until items.size).map { (at + it) % items.size }.let { list ->
+      if (shuffle) list.sortedBy { if (fresh(it)) 0 else 1 } else list
+    }
     // With nothing held yet, a song that can still be fetched (it starts once its file is here), as a car pick does.
     val next = findNext(wrap = false)?.first?.takeIf(::usable)
       ?: after.firstOrNull(::usable)
@@ -399,20 +487,22 @@ class PlayQueue<T>(
   }
 
   /** The next playable index and whether reaching it crosses into the next round. */
-  private fun findNext(wrap: Boolean): Pair<Int, Boolean>? {
+  private fun findNext(wrap: Boolean, manual: Boolean = false): Pair<Int, Boolean>? {
     if (shuffle) {
       // ARTIST-RUN-001 (owner, 2026-11-24): the now playing queue never plays one artist more than four times in a row
       // while another artist's song is left to play.
       val run = if (once) runArtist() else ""
       // SHUFFLE-STAY-001: songs already played this round wait, they are not taken out of the queue.
-      val open = order.filter { isPlayable(items[it]) && !playedThisRound(it) }
+      val open = preferFresh(order.filter { isPlayable(items[it]) && !playedThisRound(it) })
       (open.firstOrNull { run.isEmpty() || artistKey(artistOf(items[it])) != run } ?: open.firstOrNull())?.let { return it to false }
       if (!wrap) return null
-      // SHUFFLE-STAY-001: with every song of a play-once queue played, repeat off waits for a new song; only repeat all
-      // opens a fresh round, which never opens with the song just played while another one can go first.
-      if (once && repeat != Repeat.ALL) return null
+      // SHUFFLE-STAY-001 (owner, 2026-11-24): automatic advance waits at the end of an exhausted play-once round, so it
+      // does not start itself again. Owner reversal (2026-11-28): an explicit Next press (manual) opens the next round.
+      // Repeat all always opens one. The new round never opens with the song just played while another can go first.
+      if (once && repeat != Repeat.ALL && !manual) return null
       // Readiness and explicit selection can change which song really closes the round.
-      val next = nextRound.firstOrNull { it != index && isPlayable(items[it]) }
+      val next = nextRound.filter { it != index && isPlayable(items[it]) && fresh(it) }.firstOrNull()
+        ?: nextRound.firstOrNull { it != index && isPlayable(items[it]) }
         ?: nextRound.firstOrNull { isPlayable(items[it]) }
       return next?.let { it to true }
     }

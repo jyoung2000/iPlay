@@ -29,6 +29,18 @@ class CarResumeTest {
     assertEquals(61_000L, r.positionMs)
   }
 
+  @Test fun aCarPlayAfterALongStopStartsTheSongAtItsBeginning() {
+    val stopped = 1_000_000L
+    val saved = saved(1, 61_000, "a", "b", "c").put("savedAt", stopped)
+    // SESSION-RESET-001: the car's Play after more than four minutes stopped is a new session.
+    val fresh = CarResume.plan(saved, emptyList(), { true }, stopped + NativeStateCodec.IDLE_LIMIT_MS + 1)!!
+    assertEquals(1, fresh.index)
+    assertEquals(0L, fresh.positionMs)
+    // Within the session the car resumes where the audio stopped.
+    val same = CarResume.plan(saved, emptyList(), { true }, stopped + NativeStateCodec.IDLE_LIMIT_MS)!!
+    assertEquals(61_000L, same.positionMs)
+  }
+
   @Test fun withNoSavedQueueTheLibraryQueuePlaysFromItsStart() {
     val lib = listOf(MediaHub.Song("x", "X", "A", null, null, 1000, true), MediaHub.Song("y", "Y", "A", null, null, 1000, true))
     val r = CarResume.plan(null, lib)!!

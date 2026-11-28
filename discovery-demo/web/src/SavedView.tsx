@@ -397,21 +397,12 @@ export function SavedView({ saved, lists, onLists, onPreview, onPlayAll, onRemov
         <ListStripBar tracks={current.items.map((i) => i.track)} header pending={looking} />
       )}
 
-      {current && current.count > 0 && (
-        <SoundCard
-          key={current.id}
-          taste={shown?.taste ?? ownTaste?.taste ?? null}
-          listening={false}
-          title={`Sound of “${current.name}”`}
-          label="This list's mix"
-          historyKey={`airwave.sound.list.${current.id}`}
-          idleText={shown ? listMixNote(shown) : 'Reading the list…'}
-          emptyText={looking
-            ? `Looking up the genres of ${looking} ${looking === 1 ? 'song' : 'songs'} in this list. The mix fills in as they arrive.`
-            : shown ? `No genre known yet for the ${shown.songs} songs in this list. Play it as your queue and discovery looks them up.` : 'Reading the list…'}
-        />
-      )}
-
+      {/*
+        PLAYLIST-ROOM-001 (owner, 2026-11-28): "ensure the playlist ui and ux is tall enough". An open list
+        used to put its Sound card and its availability card above the songs, which on a 412 x 839 phone
+        pushed the first song to y=694 — one row on screen. The songs come first now and both cards follow
+        them; they are still the open list's own cards, just no longer between the listener and the songs.
+      */}
       {saved == null ? (
         <p className="state">
           <span className="sdot sdot--busy" aria-hidden="true" /> Loading…
@@ -420,7 +411,6 @@ export function SavedView({ saved, lists, onLists, onPreview, onPlayAll, onRemov
         <p className="empty">{current ? 'Nothing in this list yet.' : 'Songs you like appear here.'}</p>
       ) : (
         <>
-        <ListDownloadBar tracks={rows.map((r) => r.track)} label={current ? current.name : 'All saved'} />
         <ul className="well tracks tracks--saved">
           {rows.map(({ track, played, characteristics }) => {
             const cache = cacheOf?.(track.key) ?? null;
@@ -497,6 +487,22 @@ export function SavedView({ saved, lists, onLists, onPreview, onPlayAll, onRemov
             );
           })}
         </ul>
+        {/* PLAYLIST-ROOM-001: the list's context, under its songs. What is downloaded first, then its sound. */}
+        <ListDownloadBar tracks={rows.map((r) => r.track)} label={current ? current.name : 'All saved'} />
+        {current && current.count > 0 && (
+          <SoundCard
+            key={current.id}
+            taste={shown?.taste ?? ownTaste?.taste ?? null}
+            listening={false}
+            title={`Sound of “${current.name}”`}
+            label="This list's mix"
+            historyKey={`airwave.sound.list.${current.id}`}
+            idleText={shown ? listMixNote(shown) : 'Reading the list…'}
+            emptyText={looking
+              ? `Looking up the genres of ${looking} ${looking === 1 ? 'song' : 'songs'} in this list. The mix fills in as they arrive.`
+              : shown ? `No genre known yet for the ${shown.songs} songs in this list. Play it as your queue and discovery looks them up.` : 'Reading the list…'}
+          />
+        )}
         </>
       )}
     </section>

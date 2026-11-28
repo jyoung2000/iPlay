@@ -91,26 +91,75 @@ export function tasteArtists(colours: readonly Colour[], want = 6, cursor = 0): 
   return out;
 }
 
+/** An artist name with the key it is de-duplicated by (fold). */
+type Named = { name: string; key: string };
+
+/** The first occurrence of each artist, in order, by fold key. */
+const distinct = (names: readonly string[]): Named[] => {
+  const seen = new Set<string>();
+  const out: Named[] = [];
+  for (const name of names) {
+    const key = fold(name);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push({ name, key });
+  }
+  return out;
+};
+
 /**
- * The artists a run with no starting song begins from: the listener's stars, then what their listening
- * says, then their taste map's colours — each source only filling what the one before left.
+ * The artists a run with no starting song begins from. Stars come first (NEXT-FAV-COLD-001). One slot each is
+ * kept for the listening source and for the taste source when they have an artist the stars do not already cover
+ * (ARTIST-SPREAD-001), so a long star list cannot crowd them out. Any room left goes to the leftover stars, then to
+ * the listening and taste sources alternately.
  */
 export function coldStarters(
   input: { starred: readonly string[]; rows: readonly ColdRow[]; colours: readonly Colour[]; now: number; cursor?: number },
   want = 6,
 ): ColdStarter[] {
+  const cap = Math.max(0, Math.trunc(want));
+  const starred = distinct(input.starred);
+  const starKeys = new Set(starred.map((s) => s.key));
+  // A little more than the target from each lane, so leaving out the stars still leaves enough to choose from.
+  const pool = cap + starred.length;
+  const listening = distinct(listeningArtists(input.rows, input.now, pool)).filter((s) => !starKeys.has(s.key));
+  const taste = distinct(tasteArtists(input.colours, pool, input.cursor ?? 0)).filter((s) => !starKeys.has(s.key));
+
+  // One reserved slot each for listening and taste, when they have an artist the stars do not cover.
+  const listenPick = listening[0] ?? null;
+  const tastePick = taste.find((t) => t.key !== listenPick?.key) ?? null;
+  const reserved = (listenPick ? 1 : 0) + (tastePick ? 1 : 0);
+  // The stars take what the reserved picks leave. A listener with any star keeps at least one, even at a tiny target.
+  const starBudget = Math.max(Math.min(1, starred.length), cap - reserved);
+
   const out: ColdStarter[] = [];
-  const seen = new Set<string>();
-  const take = (name: string, from: ColdStarter['from']) => {
-    const key = fold(name);
-    if (!key || seen.has(key) || out.length >= want) return;
-    seen.add(key);
-    out.push({ name, from });
+  const used = new Set<string>();
+  const add = (s: Named, from: ColdStarter['from']) => {
+    used.add(s.key);
+    out.push({ name: s.name, from });
   };
-  for (const s of input.starred) take(s, 'starred');
-  for (const a of listeningArtists(input.rows, input.now, want)) take(a, 'listening');
-  for (const a of tasteArtists(input.colours, want, input.cursor ?? 0)) take(a, 'taste');
-  return out;
+  for (const s of starred.slice(0, starBudget)) add(s, 'starred');
+  if (listenPick) add(listenPick, 'listening');
+  if (tastePick) add(tastePick, 'taste');
+
+  // Anything still short of the target: the leftover stars, then listening and taste alternately.
+  const alternating: { s: Named; from: ColdStarter['from'] }[] = [];
+  for (let i = 0; i < Math.max(listening.length, taste.length); i++) {
+    const l = listening[i];
+    const t = taste[i];
+    if (l) alternating.push({ s: l, from: 'listening' });
+    if (t) alternating.push({ s: t, from: 'taste' });
+  }
+  const rest: { s: Named; from: ColdStarter['from'] }[] = [
+    ...starred.map((s) => ({ s, from: 'starred' as const })),
+    ...alternating,
+  ];
+  for (const { s, from } of rest) {
+    if (out.length >= cap) break;
+    if (used.has(s.key)) continue;
+    add(s, from);
+  }
+  return out.slice(0, cap);
 }
 
 /** What the run says it started from, for the listener. */
@@ -118,11 +167,13 @@ export function coldReason(starters: readonly ColdStarter[]): string {
   if (!starters.length) return '';
   const names = starters.slice(0, 3).map((s) => s.name);
   const list = names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
-  const kinds = new Set(starters.map((s) => s.from));
-  const where = kinds.has('starred')
-    ? kinds.size > 1 ? 'your starred artists and your listening' : 'your starred artists'
-    : kinds.has('listening')
-      ? kinds.has('taste') ? 'your listening and your sound' : 'your listening'
-      : 'your sound';
+  // ARTIST-SPREAD-001: name each source that was really used, in the order the run took them.
+  const label: Record<ColdStarter['from'], string> = {
+    starred: 'your starred artists',
+    listening: 'your listening',
+    taste: 'your sound',
+  };
+  const parts = [...new Set(starters.map((s) => label[s.from]))];
+  const where = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
   return `Started from ${where}: ${list}.`;
 }

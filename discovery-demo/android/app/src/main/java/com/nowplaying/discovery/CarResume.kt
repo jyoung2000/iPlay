@@ -10,11 +10,18 @@ import org.json.JSONObject
 object CarResume {
   data class Plan(val entries: List<Pair<String, MediaHub.Song>>, val index: Int, val positionMs: Long)
 
-  fun plan(saved: JSONObject?, libraryQueue: List<MediaHub.Song>, sourceAllowed: (String) -> Boolean = { true }): Plan? {
+  fun plan(
+    saved: JSONObject?,
+    libraryQueue: List<MediaHub.Song>,
+    sourceAllowed: (String) -> Boolean = { true },
+    nowMs: Long = System.currentTimeMillis(),
+  ): Plan? {
     val q = saved?.let { runCatching { NativeStateCodec.nativeOf(it, sourceAllowed) }.getOrNull() }
     if (q != null && q.entries.isNotEmpty()) {
       val i = q.control.index
-      return if (i in q.entries.indices) Plan(q.entries, i, q.positionMs) else Plan(q.entries, 0, 0)
+      // SESSION-RESET-001: a car Play after a long stop starts the song at its beginning.
+      val at = NativeStateCodec.restorePositionMs(q.savedAtMs, q.positionMs, nowMs)
+      return if (i in q.entries.indices) Plan(q.entries, i, at) else Plan(q.entries, 0, 0)
     }
     if (libraryQueue.isEmpty()) return null
     return Plan(libraryQueue.map { it.id to it }, 0, 0)

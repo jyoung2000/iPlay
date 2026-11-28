@@ -238,7 +238,9 @@ class PlayQueueTest {
     q.repeat = PlayQueue.Repeat.OFF
     assertNull(q.peekAfterEnd())
     assertNull(q.advance(false))
-    assertNull("shuffle never starts a new round with repeat off", q.advance(true))
+    // Owner reversal (2026-11-28): an explicit Next press at the end of an exhausted round opens a new one;
+    // automatic advance (checked above) still stops there.
+    assertNotNull("Next opens a new shuffled round with repeat off", q.advance(true))
   }
 
   @Test fun noReadySongsStopAndASingleReadySongCanRepeat() {
@@ -394,18 +396,20 @@ class PlayQueueTest {
     assertEquals(listOf("a", "c"), played.sorted())
   }
 
-  @Test fun shuffleNeverStartsAnotherRoundOverHeardSongsEvenOnNext() {
+  // SHUFFLE-STAY-001, amended by the owner (2026-11-28): with Repeat off, a Next press after the round's last song
+  // starts a new round. Automatic advance still stops at the end of an exhausted round.
+  @Test fun manualNextStartsANewRoundWhenTheShuffledRoundIsUsedUp() {
     val q = onceQueue(H("a"), H("b"))
     assertEquals(1, q.advance(pressed = false))
-    assertNull("Next does not wrap round to a song just heard", q.advance(pressed = true))
-    assertNull(q.peekNextPressed())
+    assertNull("automatic advance stops at the end of the round", q.advance(pressed = false))
     assertNull(q.peekAfterEnd())
+    assertEquals("Next opens a new round with the song not playing", 0, q.advance(pressed = true))
   }
 
   @Test fun aNewSongArrivingAfterTheEndIsTheNextOne() {
     val q = onceQueue(H("a"), H("b"))
     q.advance(pressed = false)
-    assertNull(q.advance(pressed = true))
+    assertNull(q.advance(pressed = false))
     q.set(listOf(H("a"), H("b"), H("e")), 1)
     assertEquals(2, q.peekAfterEnd())
     assertEquals(2, q.advance(pressed = false))
@@ -420,7 +424,8 @@ class PlayQueueTest {
         assertTrue("seed $seed repeated ${q.items[next].key} after $played", played.add(q.items[next].key))
       }
       assertEquals(setOf("a", "b", "c"), played)
-      assertNull("shuffle with repeat off waits when this round is exhausted", q.advance(pressed = true))
+      assertNull("automatic advance waits when this round is exhausted", q.advance(pressed = false))
+      assertTrue("Next opens a new round", q.advance(pressed = true) != null)
     }
   }
 
@@ -466,7 +471,7 @@ class PlayQueueTest {
   @Test fun theXAlwaysLeavesADislikedSongEvenWhenTheRoundIsUsedUp() {
     for (start in 0..3) {
       val q = plain("a", "b", "c", "d", shuffle = true, at = start)
-      while (q.advance(pressed = true) != null) Unit // play the round out
+      while (q.advance(pressed = false) != null) Unit // play the round out (automatic advance: a Next press would open a new round)
       val gone = q.current!!.key
       val i = q.leave(gone) ?: throw AssertionError("start $start: X could not leave $gone")
       assertTrue("start $start: the disliked song must go", q.items.none { it.key == gone })
@@ -497,7 +502,7 @@ class PlayQueueTest {
     for (seed in 0 until 25) {
       val q = PlayQueue<A>({ it.key }, { true }, Random(seed), artistOf = { it.artist }).apply { shuffle = true; playsOnce = true; set(songs, 0) }
       val played = mutableListOf(q.items[q.index].artist)
-      while (true) { val i = q.advance(pressed = true) ?: break; played += q.items[i].artist }
+      while (true) { val i = q.advance(pressed = false) ?: break; played += q.items[i].artist }
       val norm = played.map { PlayQueue.artistKey(it) }
       val firstKen = norm.indexOfFirst { it == "ken carson" }
       // Up to the last Ken Carson song, no run of five.
@@ -512,7 +517,7 @@ class PlayQueueTest {
   @Test fun oneArtistAloneStillPlaysOn() {
     val q = runQueue(*(1..6).map { A("s$it", "Slayr") }.toTypedArray())
     var n = 1
-    while (q.advance(pressed = true) != null) n++
+    while (q.advance(pressed = false) != null) n++
     assertEquals(6, n)
   }
 
@@ -538,11 +543,11 @@ class PlayQueueTest {
     assertEquals(keys, q.items.map { it.key })
   }
 
-  @Test fun repeatOffStillWaitsAtTheEndOfAPlayOnceRoundAndKeepsEverySong() {
+  @Test fun repeatOffWaitsForAutomaticAdvanceAtTheEndOfAPlayOnceRoundAndKeepsEverySong() {
     val q = onceQueue(H("a"), H("b"), H("c", heard = true))
     assertEquals("b", q.advance(pressed = false)?.let { q.items[it].key })
-    assertNull("repeat off waits for a new song instead of starting another round", q.advance(pressed = false))
-    assertNull(q.advance(pressed = true))
+    assertNull("automatic advance waits at the end of the round", q.advance(pressed = false))
+    assertTrue("Next starts a new round", q.advance(pressed = true) != null)
     assertEquals("nothing is taken out of the queue", listOf("a", "b", "c"), q.items.map { it.key })
   }
 

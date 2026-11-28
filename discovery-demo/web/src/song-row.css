@@ -48,8 +48,10 @@
    was a pill. One row shape at every width; the buttons keep the 36px circle in a 44px target. */
 @media (max-width: 480px) {
   ul.tracks--saved > li.track {
-    grid-template-columns: var(--row-cover) minmax(0, 1fr);
-    grid-template-areas: 'art text' 'actions actions';
+    /* PLAYLIST-PLAYED-001: the played badge keeps its own column on a phone too (it used to be hidden
+       here, so a playlist showed no play state); the buttons still take the full width underneath. */
+    grid-template-columns: var(--row-cover) minmax(0, 1fr) auto;
+    grid-template-areas: 'art text played' 'actions actions actions';
     gap: 8px var(--row-gap);
     padding: 12px;
   }

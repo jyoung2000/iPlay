@@ -126,6 +126,8 @@ object NativeStateCodec {
     val entries: List<Pair<String, MediaHub.Song>>,
     val control: com.nowplaying.discovery.engine.PlayQueue.Control,
     val positionMs: Long,
+    /** Wall-clock ms when audio last stopped; 0 when unknown (older saves). Persisted, so never a monotonic clock. */
+    val savedAtMs: Long = 0L,
   )
 
   fun nativeJson(q: NativeQueue): JSONObject {
@@ -142,7 +144,29 @@ object NativeStateCodec {
       .put("order", JSONArray(c.order))
       .put("nextRound", JSONArray(c.nextRound))
       .put("heard", JSONArray(c.heard))
+      .put("played", JSONArray(c.played.takeLast(MAX_QUEUE)))
+      .put("savedAt", q.savedAtMs)
   }
+
+  /** SESSION-PLAYED-001: audio stopped longer than this ends the session (the page's SESSION-RESET-001 window). */
+  const val IDLE_LIMIT_MS = 4 * 60_000L
+
+  /** True when audio stopped more than [IDLE_LIMIT_MS] before [nowMs]. Exactly the limit is still the same session; unknown stop time is not. */
+  fun isNewSession(savedAtMs: Long, nowMs: Long): Boolean = savedAtMs > 0 && nowMs - savedAtMs > IDLE_LIMIT_MS
+
+  /**
+   * The stop time a save records: when audio stopped if it is stopped, else now (a save while playing is
+   * the latest moment audio was known to play, so a process killed mid-song counts from its last save).
+   * Saving again while stopped must not move the stop time forward and hide a long pause.
+   */
+  fun stopTimeToSave(idleSinceMs: Long, nowMs: Long): Long = if (idleSinceMs > 0) idleSinceMs else nowMs
+
+  /**
+   * SESSION-RESET-001: where a restored song opens. A new session opens it at its beginning; within the
+   * session it opens where the audio stopped. A save with no stop time keeps its place.
+   */
+  fun restorePositionMs(savedAtMs: Long, positionMs: Long, nowMs: Long): Long =
+    if (isNewSession(savedAtMs, nowMs)) 0L else positionMs
 
   /** Every saved entry comes back (none is silently dropped); an invalid state as a whole is null. */
   fun nativeOf(o: JSONObject, sourceAllowed: (String) -> Boolean): NativeQueue? {
@@ -158,8 +182,9 @@ object NativeStateCodec {
     val repeat = when (o.optInt("repeat", 0)) { 1 -> com.nowplaying.discovery.engine.PlayQueue.Repeat.ONE; 3 -> com.nowplaying.discovery.engine.PlayQueue.Repeat.ONCE; 4 -> com.nowplaying.discovery.engine.PlayQueue.Repeat.TWICE; else -> com.nowplaying.discovery.engine.PlayQueue.Repeat.OFF }
     val control = com.nowplaying.discovery.engine.PlayQueue.Control(
       o.optInt("index", -1), repeat, o.optBoolean("shuffle", false), keys("order"), keys("nextRound"), keys("heard"),
+      keys("played"),
     )
-    return NativeQueue(entries, control, o.optLong("positionMs", 0).coerceAtLeast(0))
+    return NativeQueue(entries, control, o.optLong("positionMs", 0).coerceAtLeast(0), o.optLong("savedAt", 0).coerceAtLeast(0))
   }
 
   /**

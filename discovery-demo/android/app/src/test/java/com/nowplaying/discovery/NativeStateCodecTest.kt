@@ -144,7 +144,7 @@ class NativeStateCodecTest {
       "playlist/p1/track/b" to NativeStateCodec.songOf(song("b"), allowed)!!,
       "c" to NativeStateCodec.songOf(song("c"), allowed)!!,
     )
-    val control = PlayQueue.Control(1, PlayQueue.Repeat.TWICE, true, listOf("c", "a", "b"), listOf("b", "c"), listOf("c", "a"))
+    val control = PlayQueue.Control(1, PlayQueue.Repeat.TWICE, true, listOf("c", "a", "b"), listOf("b", "c"), listOf("c", "a"), listOf("b", "c", "a"))
     val json = NativeStateCodec.nativeJson(NativeStateCodec.NativeQueue(entries, control, 61_000))
     val io = MapIo()
     assertTrue(NativeStateCodec.Store(io).recordNativeState(json))
@@ -165,10 +165,46 @@ class NativeStateCodecTest {
     val legacy = NativeStateCodec.nativeJson(NativeStateCodec.NativeQueue(entries, control.copy(repeat = PlayQueue.Repeat.ALL), 0))
     assertEquals(PlayQueue.Repeat.OFF, NativeStateCodec.nativeOf(legacy, allowed)!!.control.repeat)
     assertEquals(PlayQueue.Repeat.OFF, NativeStateCodec.nativeOf(JSONObject(json.toString()).put("repeat", 2), allowed)!!.control.repeat)
+    // SESSION-PLAYED-001: an older save has no played list; it restores with none rather than being refused.
+    val old = JSONObject(json.toString()).apply { remove("played") }
+    assertEquals(emptyList<String>(), NativeStateCodec.nativeOf(old, allowed)!!.control.played)
     // A link the guard no longer allows is dropped, and the song is then not ready.
     val strict = NativeStateCodec.nativeOf(json, { false })!!
     assertNull(strict.entries[0].second.source)
     assertFalse(strict.entries[0].second.ready)
+  }
+
+  @Test fun aSaveRemembersWhenAudioStoppedAndAStaleOneStartsANewSession() {
+    val entries = listOf("a" to NativeStateCodec.songOf(song("a"), allowed)!!)
+    val control = PlayQueue.Control(0, PlayQueue.Repeat.OFF, true, listOf("a"), listOf("a"), listOf("a"), listOf("a"))
+    val json = NativeStateCodec.nativeJson(NativeStateCodec.NativeQueue(entries, control, 0, 1_000_000L))
+    val back = NativeStateCodec.nativeOf(json, allowed)!!
+    assertEquals(1_000_000L, back.savedAtMs)
+    assertEquals(listOf("a"), back.control.played)
+    // SESSION-PLAYED-001: exactly the idle limit is still the same session; past it is a new one.
+    assertFalse(NativeStateCodec.isNewSession(1_000_000L, 1_000_000L + NativeStateCodec.IDLE_LIMIT_MS))
+    assertTrue(NativeStateCodec.isNewSession(1_000_000L, 1_000_000L + NativeStateCodec.IDLE_LIMIT_MS + 1))
+    // An unknown stop time (an older save) never starts a new session by itself.
+    assertFalse(NativeStateCodec.isNewSession(0L, Long.MAX_VALUE))
+  }
+
+  @Test fun aSaveWhileStoppedKeepsWhenAudioStoppedAndAPlayingSaveUsesNow() {
+    assertEquals(5_000L, NativeStateCodec.stopTimeToSave(5_000L, 900_000L))
+    assertEquals(900_000L, NativeStateCodec.stopTimeToSave(0L, 900_000L))
+    // A stopped queue saved again ten minutes later still reads as a long pause.
+    val saved = NativeStateCodec.stopTimeToSave(5_000L, 5_000L + 10 * 60_000L)
+    assertTrue(NativeStateCodec.isNewSession(saved, 5_000L + 10 * 60_000L))
+  }
+
+  @Test fun aNewSessionOpensAtTheStartOfTheSongAndTheSameSessionWhereItStopped() {
+    val stopped = 1_000_000L
+    val sameSession = stopped + NativeStateCodec.IDLE_LIMIT_MS
+    val newSession = stopped + NativeStateCodec.IDLE_LIMIT_MS + 1
+    // SESSION-RESET-001: back after more than four minutes stopped opens the song at 0:00.
+    assertEquals(0L, NativeStateCodec.restorePositionMs(stopped, 61_000L, newSession))
+    assertEquals(61_000L, NativeStateCodec.restorePositionMs(stopped, 61_000L, sameSession))
+    // An older save with no stop time keeps its place.
+    assertEquals(61_000L, NativeStateCodec.restorePositionMs(0L, 61_000L, Long.MAX_VALUE))
   }
 
   @Test fun invalidNativeStateIsRefusedWhole() {
