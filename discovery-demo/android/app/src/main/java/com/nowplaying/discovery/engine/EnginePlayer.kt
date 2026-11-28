@@ -420,9 +420,22 @@ class EnginePlayer(
     return md.buildUpon().setArtworkData(RadioArt.bytes(context), MediaMetadata.PICTURE_TYPE_FRONT_COVER).build()
   }
 
+  /**
+   * CAR-SKIP-002: the order the session publishes. Shuffled, that is the round's play order
+   * ([PlayQueue.roundTimeline]), so Android Auto sees a window after the song playing exactly while
+   * this app can really move on. In the list's own order (shuffle off) the list is the play order
+   * already, and the car shows the queue as the listener wrote it.
+   */
+  private fun shownOrder(): List<Int> =
+    if (queue.shuffle && !radioLive) queue.roundTimeline(::canFetch) else queue.items.indices.toList()
+
   override fun getState(): State {
     val snap = engine.snapshot
-    val playlist = queue.items.mapIndexed { i, e ->
+    val shown = shownOrder()
+    val playlist = shown.map { i ->
+      val e = queue.items[i]
+      // The uid stays the song's place in the queue, not its place in this order, so a reshuffle
+      // of what is published does not read as a different song to the controller.
       MediaItemData.Builder("${e.mediaId}#$i")
         .setMediaItem(MediaItem.Builder().setMediaId(e.mediaId).setMediaMetadata(nowPlayingMetadata(e.song)).build())
         .setMediaMetadata(nowPlayingMetadata(e.song))
@@ -440,7 +453,7 @@ class EnginePlayer(
       .setPlayerError(error)
       .setPlayWhenReady(playWhenReady, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
       .setPlaylist(playlist)
-      .setCurrentMediaItemIndex(queue.index.coerceAtLeast(0))
+      .setCurrentMediaItemIndex(shown.indexOf(queue.index).let { if (it >= 0) it else 0 })
       // CAR-RADIO-CLOCK-002: live radio with no known song start has no clock; a running count from zero would be invented.
       .setContentPositionMs(if (playing && !(radioLive && radioStartMs == null)) PositionSupplier.getExtrapolating(positionMs, 1f) else PositionSupplier.getConstant(positionMs))
       .setShuffleModeEnabled(if (radioLive) com.nowplaying.discovery.RadioNative.shuffle else queue.shuffle)
@@ -671,9 +684,12 @@ class EnginePlayer(
         if (seekCommand == Player.COMMAND_SEEK_TO_PREVIOUS && at > RESTART_THRESHOLD_MS) pageSeek(0) else skip(forward = false)
       }
       Player.COMMAND_SEEK_TO_MEDIA_ITEM -> {
-        val entry = queue.items.getOrNull(mediaItemIndex)
+        // CAR-SKIP-002: the controller names a row of the order this session published, which under
+        // shuffle is the round's play order, so it is mapped back to the song's place in the queue.
+        val at = shownOrder().getOrNull(mediaItemIndex) ?: mediaItemIndex
+        val entry = queue.items.getOrNull(at)
         if (entry != null && pageLive) page?.command(JSONObject().put("type", "playId").put("id", entry.mediaId))
-        else if (queue.select(mediaItemIndex)) { nativeChange(); loadCurrent(positionMs.coerceAtLeast(0), chosen = true) }
+        else if (queue.select(at)) { nativeChange(); loadCurrent(positionMs.coerceAtLeast(0), chosen = true) }
       }
       else -> pageSeek(positionMs)
     }

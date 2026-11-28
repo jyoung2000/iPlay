@@ -160,6 +160,37 @@ class PlayQueue<T>(
     current?.let { heard += identityOf(it) }
   }
 
+  /**
+   * CAR-SKIP-002 (owner, 2026-11-28: "the skip button on android auto does not work after a while").
+   *
+   * The round as a timeline: the songs already behind the listener, the song playing, then the songs
+   * a press can still reach, in the order the round will reach them. Android Auto is a Media3
+   * controller and works out for itself whether a next song exists, from the published timeline
+   * alone — [androidx.media3.common.BasePlayer.seekToNext] then drops the press before this app ever
+   * sees it. Published in the list's own order, a shuffled round whose song happens to sit on the
+   * last row therefore looks finished, and the car's Next goes dead while songs are still unplayed.
+   *
+   * So the published order must BE the play order. A song is "still reachable" by exactly the test
+   * [findNext] applies, plus [canFollow] for one that is not on the phone yet but can still be
+   * streamed ([advanceFetchable]); everything else sits behind the song playing, where it cannot
+   * promise the car a next song this round has no intention of playing.
+   */
+  fun roundTimeline(canFollow: (T) -> Boolean = { false }): List<Int> {
+    val at = index
+    val drawn = order.filter { it in items.indices }
+    val seen = drawn.toHashSet()
+    val all = drawn + items.indices.filter { it !in seen }
+    // Same rule as findNext's open list (playedThisRound covers both the round's heard set and the
+    // first-round heard-before marks), so the published timeline can never offer a next findNext refuses.
+    fun reachable(i: Int) = i != at &&
+      !playedThisRound(i) &&
+      (isPlayable(items[i]) || canFollow(items[i]))
+    val ahead = all.filter(::reachable)
+    val aheadSet = ahead.toHashSet()
+    val behind = all.filter { it != at && it !in aheadSet }
+    return if (at in items.indices) behind + at + ahead else behind + ahead
+  }
+
   /** This round's play order (indices into [items]); under shuffle the current song comes first. */
   private var order: List<Int> = emptyList()
   /** The round after this one, drawn in advance. */
