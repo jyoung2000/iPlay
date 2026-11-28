@@ -49,7 +49,7 @@ class PlayQueue<T>(
    * heard set resets each round and the page's heard-before marks are history, so neither says what actually played.
    * A new round, and the fallback fetch, prefer songs outside this set before any repeat.
    */
-  private val sessionPlayed = HashSet<String>()
+  private val sessionPlayed = LinkedHashSet<String>() // insertion order, so a bounded save keeps the newest
   private fun fresh(i: Int): Boolean = identityOf(items[i]) !in sessionPlayed
   /** The candidates not yet played this session, or all of them once every one has played. */
   private fun preferFresh(indices: List<Int>): List<Int> = indices.filter { fresh(it) }.ifEmpty { indices }
@@ -136,6 +136,8 @@ class PlayQueue<T>(
     val order: List<String>,
     val nextRound: List<String>,
     val heard: List<String>,
+    /** SESSION-PLAYED-001: every song played since the queue began, across rounds, oldest first. Absent in older saves. */
+    val played: List<String> = emptyList(),
   )
 
   /**
@@ -155,6 +157,7 @@ class PlayQueue<T>(
   fun control(): Control = Control(
     index, repeat, shuffle,
     order.map { identityOf(items[it]) }, nextRound.map { identityOf(items[it]) }, heard.toList(),
+    sessionPlayed.toList(),
   )
 
   /**
@@ -182,8 +185,10 @@ class PlayQueue<T>(
     nextRound = if (c.shuffle) remap(c.nextRound) else items.indices.toList()
     heard += c.heard
     current?.let { heard += identityOf(it) }
-    // The saved state holds only this round's heard keys, so a restored queue keeps those as played this session.
+    // SESSION-PLAYED-001: songs played in earlier rounds stay played after a restart. An older save has no played
+    // list, so its round's heard keys are the most that is known.
     sessionPlayed.clear()
+    sessionPlayed += c.played
     sessionPlayed += heard
   }
 

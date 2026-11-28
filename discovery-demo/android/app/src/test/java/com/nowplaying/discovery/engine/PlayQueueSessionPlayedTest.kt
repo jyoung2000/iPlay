@@ -55,6 +55,32 @@ class PlayQueueSessionPlayedTest {
     }
   }
 
+  @Test fun songsPlayedInEarlierRoundsStayPlayedAfterARestart() {
+    for (seed in 1..60) {
+      val q = queue(seed)
+      var items = listOf("a", "b")
+      q.set(items, 0)
+      q.advance(pressed = true) // b; the round is used up
+      q.advance(pressed = true) // Next opens a new round: a and b have both played
+      val saved = q.control()
+      assertTrue("seed $seed: the save names every song played, got ${saved.played}", saved.played.containsAll(items))
+      // The process dies; a new queue is restored from the save, then a song is added.
+      val back = queue(seed + 1000)
+      items = items + "t"
+      back.restore(items, saved)
+      val next = back.advance(pressed = true)
+      assertNotNull("seed $seed: Next found nothing", next)
+      assertEquals("seed $seed: the new song plays before a repeat after a restart", "t", items[next!!])
+    }
+  }
+
+  @Test fun anOlderSaveWithoutAPlayedListStillRestores() {
+    val q = queue(1)
+    q.restore(listOf("a", "b", "c"), PlayQueue.Control(0, PlayQueue.Repeat.OFF, true, listOf("a", "b", "c"), listOf("a", "b", "c"), listOf("a")))
+    assertEquals("a", q.current)
+    assertEquals(listOf("a"), q.control().played)
+  }
+
   @Test fun automaticAdvanceStopsAtTheEndOfAShuffledRoundButNextOpensTheNextOne() {
     for (seed in 1..60) {
       val q = queue(seed)

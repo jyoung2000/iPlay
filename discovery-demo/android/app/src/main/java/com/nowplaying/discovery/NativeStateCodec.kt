@@ -142,6 +142,7 @@ object NativeStateCodec {
       .put("order", JSONArray(c.order))
       .put("nextRound", JSONArray(c.nextRound))
       .put("heard", JSONArray(c.heard))
+      .put("played", JSONArray(c.played.takeLast(MAX_QUEUE)))
   }
 
   /** Every saved entry comes back (none is silently dropped); an invalid state as a whole is null. */
@@ -158,6 +159,7 @@ object NativeStateCodec {
     val repeat = when (o.optInt("repeat", 0)) { 1 -> com.nowplaying.discovery.engine.PlayQueue.Repeat.ONE; 3 -> com.nowplaying.discovery.engine.PlayQueue.Repeat.ONCE; 4 -> com.nowplaying.discovery.engine.PlayQueue.Repeat.TWICE; else -> com.nowplaying.discovery.engine.PlayQueue.Repeat.OFF }
     val control = com.nowplaying.discovery.engine.PlayQueue.Control(
       o.optInt("index", -1), repeat, o.optBoolean("shuffle", false), keys("order"), keys("nextRound"), keys("heard"),
+      keys("played"),
     )
     return NativeQueue(entries, control, o.optLong("positionMs", 0).coerceAtLeast(0))
   }

@@ -144,7 +144,7 @@ class NativeStateCodecTest {
       "playlist/p1/track/b" to NativeStateCodec.songOf(song("b"), allowed)!!,
       "c" to NativeStateCodec.songOf(song("c"), allowed)!!,
     )
-    val control = PlayQueue.Control(1, PlayQueue.Repeat.TWICE, true, listOf("c", "a", "b"), listOf("b", "c"), listOf("c", "a"))
+    val control = PlayQueue.Control(1, PlayQueue.Repeat.TWICE, true, listOf("c", "a", "b"), listOf("b", "c"), listOf("c", "a"), listOf("b", "c", "a"))
     val json = NativeStateCodec.nativeJson(NativeStateCodec.NativeQueue(entries, control, 61_000))
     val io = MapIo()
     assertTrue(NativeStateCodec.Store(io).recordNativeState(json))
@@ -165,6 +165,9 @@ class NativeStateCodecTest {
     val legacy = NativeStateCodec.nativeJson(NativeStateCodec.NativeQueue(entries, control.copy(repeat = PlayQueue.Repeat.ALL), 0))
     assertEquals(PlayQueue.Repeat.OFF, NativeStateCodec.nativeOf(legacy, allowed)!!.control.repeat)
     assertEquals(PlayQueue.Repeat.OFF, NativeStateCodec.nativeOf(JSONObject(json.toString()).put("repeat", 2), allowed)!!.control.repeat)
+    // SESSION-PLAYED-001: an older save has no played list; it restores with none rather than being refused.
+    val old = JSONObject(json.toString()).apply { remove("played") }
+    assertEquals(emptyList<String>(), NativeStateCodec.nativeOf(old, allowed)!!.control.played)
     // A link the guard no longer allows is dropped, and the song is then not ready.
     val strict = NativeStateCodec.nativeOf(json, { false })!!
     assertNull(strict.entries[0].second.source)
