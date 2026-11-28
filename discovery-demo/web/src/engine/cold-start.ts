@@ -91,41 +91,75 @@ export function tasteArtists(colours: readonly Colour[], want = 6, cursor = 0): 
   return out;
 }
 
+/** An artist name with the key it is de-duplicated by (fold). */
+type Named = { name: string; key: string };
+
+/** The first occurrence of each artist, in order, by fold key. */
+const distinct = (names: readonly string[]): Named[] => {
+  const seen = new Set<string>();
+  const out: Named[] = [];
+  for (const name of names) {
+    const key = fold(name);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push({ name, key });
+  }
+  return out;
+};
+
 /**
- * The artists a run with no starting song begins from: the listener's stars, what their listening says and
- * their taste map's colours — each source takes a turn in turn (ARTIST-SPREAD-001), so the stars lead but
- * cannot crowd the other two out.
+ * The artists a run with no starting song begins from. Stars come first (NEXT-FAV-COLD-001). One slot each is
+ * kept for the listening source and for the taste source when they have an artist the stars do not already cover
+ * (ARTIST-SPREAD-001), so a long star list cannot crowd them out. Any room left goes to the leftover stars, then to
+ * the listening and taste sources alternately.
  */
 export function coldStarters(
   input: { starred: readonly string[]; rows: readonly ColdRow[]; colours: readonly Colour[]; now: number; cursor?: number },
   want = 6,
 ): ColdStarter[] {
-  // ARTIST-SPREAD-001: one turn per source per lap, stars first. A long list of stars can no longer fill the
-  // whole start and leave the listening and taste sources out.
+  const cap = Math.max(0, Math.trunc(want));
+  const starred = distinct(input.starred);
+  const starKeys = new Set(starred.map((s) => s.key));
+  // A little more than the target from each lane, so leaving out the stars still leaves enough to choose from.
+  const pool = cap + starred.length;
+  const listening = distinct(listeningArtists(input.rows, input.now, pool)).filter((s) => !starKeys.has(s.key));
+  const taste = distinct(tasteArtists(input.colours, pool, input.cursor ?? 0)).filter((s) => !starKeys.has(s.key));
+
+  // One reserved slot each for listening and taste, when they have an artist the stars do not cover.
+  const listenPick = listening[0] ?? null;
+  const tastePick = taste.find((t) => t.key !== listenPick?.key) ?? null;
+  const reserved = (listenPick ? 1 : 0) + (tastePick ? 1 : 0);
+  // The stars take what the reserved picks leave. A listener with any star keeps at least one, even at a tiny target.
+  const starBudget = Math.max(Math.min(1, starred.length), cap - reserved);
+
   const out: ColdStarter[] = [];
-  const seen = new Set<string>();
-  const lanes: { from: ColdStarter['from']; names: string[]; at: number }[] = [
-    { from: 'starred', names: [...input.starred], at: 0 },
-    { from: 'listening', names: listeningArtists(input.rows, input.now, want), at: 0 },
-    { from: 'taste', names: tasteArtists(input.colours, want, input.cursor ?? 0), at: 0 },
-  ];
-  let progressed = true;
-  while (out.length < want && progressed) {
-    progressed = false;
-    for (const lane of lanes) {
-      while (lane.at < lane.names.length) {
-        const name = lane.names[lane.at++] as string;
-        const key = fold(name);
-        if (!key || seen.has(key)) continue;
-        seen.add(key);
-        out.push({ name, from: lane.from });
-        progressed = true;
-        break;
-      }
-      if (out.length >= want) break;
-    }
+  const used = new Set<string>();
+  const add = (s: Named, from: ColdStarter['from']) => {
+    used.add(s.key);
+    out.push({ name: s.name, from });
+  };
+  for (const s of starred.slice(0, starBudget)) add(s, 'starred');
+  if (listenPick) add(listenPick, 'listening');
+  if (tastePick) add(tastePick, 'taste');
+
+  // Anything still short of the target: the leftover stars, then listening and taste alternately.
+  const alternating: { s: Named; from: ColdStarter['from'] }[] = [];
+  for (let i = 0; i < Math.max(listening.length, taste.length); i++) {
+    const l = listening[i];
+    const t = taste[i];
+    if (l) alternating.push({ s: l, from: 'listening' });
+    if (t) alternating.push({ s: t, from: 'taste' });
   }
-  return out;
+  const rest: { s: Named; from: ColdStarter['from'] }[] = [
+    ...starred.map((s) => ({ s, from: 'starred' as const })),
+    ...alternating,
+  ];
+  for (const { s, from } of rest) {
+    if (out.length >= cap) break;
+    if (used.has(s.key)) continue;
+    add(s, from);
+  }
+  return out.slice(0, cap);
 }
 
 /** What the run says it started from, for the listener. */
