@@ -21,7 +21,7 @@ class PlayQueueNextDryTest {
     for (seed in 0 until 100) {
       val queue = q(S("a"), S("b"), S("t1", ready = false), S("t2", ready = false), shuffle = true, seed = seed)
       val heard = linkedSetOf(queue.current!!.key)
-      while (true) { val i = queue.advance(pressed = true) ?: break; heard += queue.items[i].key }
+      while (true) { val i = queue.advance(pressed = false) ?: break; heard += queue.items[i].key }
       assertEquals("seed $seed", setOf("a", "b"), heard)
       // Before the fix this was where the car's Next stopped working.
       val i = queue.advanceFetchable { it.link }
@@ -50,13 +50,13 @@ class PlayQueueNextDryTest {
     assertNull("nothing ahead of the last song", queue.advanceFetchable { it.link })
   }
 
-  @Test fun songsAppendedAfterTheRoundRanDryAreReachedByNext() {
+  @Test fun songsAppendedAfterTheRoundRanDryAreReachedWithoutANewRound() {
     val queue = q(S("a"), S("b"), shuffle = true)
     queue.advance(pressed = true)
-    assertNull(queue.advance(pressed = true))
+    assertNull(queue.advance(pressed = false))
     assertNull(queue.advanceFetchable { it.link })
     queue.insertSpaced(listOf(S("n1", ready = false)))
-    val i = queue.advance(pressed = true) ?: queue.advanceFetchable { it.link }
+    val i = queue.advance(pressed = false) ?: queue.advanceFetchable { it.link }
     assertEquals("n1", queue.items[i!!].key)
   }
 }

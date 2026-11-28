@@ -43,7 +43,7 @@ class PlayQueueIdentityTest {
       assertTrue("seed $seed: replayed $third after $heard", third !in heard)
       heard += third
       assertEquals("seed $seed", setOf("a", "b", "c"), heard.toSet())
-      assertNull("seed $seed: a finished round must not restart after a re-push", q.advance(pressed = true))
+      assertNull("seed $seed: a finished round must not restart after a re-push", q.advance(pressed = false))
     }
   }
 
@@ -60,7 +60,7 @@ class PlayQueueIdentityTest {
     q.set(mixed, 0)
     val next = q.advance(pressed = true)
     assertTrue("the other song should follow", next != null && q.items[next!!].id != firstId)
-    assertNull("the first song must not come back under its other id", q.advance(pressed = true))
+    assertNull("the first song must not come back under its other id", q.advance(pressed = false))
   }
 
   /**

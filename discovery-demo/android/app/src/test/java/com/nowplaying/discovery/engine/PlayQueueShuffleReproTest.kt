@@ -24,7 +24,8 @@ class PlayQueueShuffleReproTest {
         seen += q.items[i!!].key
       }
       assertEquals("seed $seed", setOf("q1", "q2", "q3"), seen.toSet())
-      assertNull("seed $seed: a played-once round must end, not restart", q.advance(pressed = true))
+      assertNull("seed $seed: automatic advance ends a played-once round", q.advance(pressed = false))
+      assertNotNull("seed $seed: Next opens a new round", q.advance(pressed = true))
     }
   }
 

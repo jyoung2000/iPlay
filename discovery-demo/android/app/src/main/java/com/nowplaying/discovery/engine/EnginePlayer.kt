@@ -952,8 +952,8 @@ class EnginePlayer(
             emit(null)
             return@post
           }
-          // Reached by advancing and not on the phone: skip it, as the page does.
-          if (queue.advance(pressed = true) != null && queue.current?.song?.id != song.id) {
+          // Reached by advancing and not on the phone: skip it, as the page does. Automatic, so it never opens a new round.
+          if (queue.advance(pressed = false) != null && queue.current?.song?.id != song.id) {
             Log.i(TAG, "not on the phone, skipped: ${song.id.take(60)} -> ${queue.current?.song?.id?.take(60)} at ${queue.index}")
             nativeChange(); loadCurrent(0, chosen = false)
           }

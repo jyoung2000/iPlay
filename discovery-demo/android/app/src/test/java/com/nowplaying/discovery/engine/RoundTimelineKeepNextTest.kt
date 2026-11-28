@@ -34,7 +34,7 @@ class RoundTimelineKeepNextTest {
   private fun playOut(queue: PlayQueue<S>): List<String> {
     val order = mutableListOf(queue.current!!.key)
     repeat(queue.items.size * 3) {
-      val i = queue.advance(pressed = true) ?: return order
+      val i = queue.advance(pressed = false) ?: return order
       order += queue.items[i].key
     }
     throw AssertionError("the round never ran out: $order")
@@ -45,7 +45,7 @@ class RoundTimelineKeepNextTest {
       val queue = q(S("a"), S("b"), S("c"), S("d"), shuffle = true, seed = seed)
       playOut(queue)
       // Nothing follows automatically: that is correct, and it is what starts the mood top-up.
-      assertEquals("seed $seed", null, queue.advance(pressed = true))
+      assertEquals("seed $seed", null, queue.advance(pressed = false))
       val stranded = queue.roundTimeline(keepNext = false)
       assertEquals("seed $seed: the round really is finished", stranded.size - 1, stranded.indexOf(queue.index))
       // Before the fix the car saw this and dropped every later Next press.
