@@ -164,6 +164,8 @@ class EnginePlayer(
   private val repeatSync = RepeatSync()
   private var repeatFromPage = false
   private var playWhenReady = false
+  /** Wall-clock ms audio last stopped (0 while it plays or never stopped); a long gap starts a new session. */
+  private var idleSince = 0L
   private var ended = false
   private var error: PlaybackException? = null
   /** Bumped whenever the current song changes, so a slow open for an old song is dropped. */
@@ -390,7 +392,7 @@ class EnginePlayer(
 
   /** NATIVE-COLD-STATE-001: the queue, its shuffle round and the native millisecond position, to save. */
   fun nativeState(): JSONObject = NativeStateCodec.nativeJson(
-    NativeStateCodec.NativeQueue(queue.items.map { it.mediaId to it.song }, queue.control(), positionMs(engine.snapshot)),
+    NativeStateCodec.NativeQueue(queue.items.map { it.mediaId to it.song }, queue.control(), positionMs(engine.snapshot), System.currentTimeMillis()),
   )
 
   /**
@@ -402,6 +404,9 @@ class EnginePlayer(
     if (queue.items.isNotEmpty() || loadedKey != null || waitingFor != null) return false
     val q = NativeStateCodec.nativeOf(saved, sourceAllowed)?.takeIf { it.entries.isNotEmpty() } ?: return false
     queue.restore(q.entries.map { (m, s) -> Entry(s, m) }, q.control)
+    // SESSION-PLAYED-001: a restore long after the audio stopped is a new session.
+    if (NativeStateCodec.isNewSession(q.savedAtMs, System.currentTimeMillis())) queue.newSession()
+    idleSince = q.savedAtMs
     engine.setRepeatOne(queue.repeatsSong)
     playWhenReady = false
     pendingStartMs = q.positionMs
@@ -761,6 +766,9 @@ class EnginePlayer(
     if (!play) owedNextFrom = null
     if (play && !requestFocus()) return
     // Car, lock-screen, focus and noisy-device controls share the phone radio pause state.
+    // SESSION-PLAYED-001: audio stopped longer than the session window ends the session; playing again starts a new one.
+    if (!play) idleSince = System.currentTimeMillis()
+    else { if (NativeStateCodec.isNewSession(idleSince, System.currentTimeMillis())) queue.newSession(); idleSince = 0L }
     if (radioLive) com.nowplaying.discovery.RadioNative.session?.paused = !play
     playWhenReady = play
     if (play) {

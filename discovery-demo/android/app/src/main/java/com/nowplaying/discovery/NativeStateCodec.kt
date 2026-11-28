@@ -126,6 +126,8 @@ object NativeStateCodec {
     val entries: List<Pair<String, MediaHub.Song>>,
     val control: com.nowplaying.discovery.engine.PlayQueue.Control,
     val positionMs: Long,
+    /** Wall-clock ms when audio last stopped; 0 when unknown (older saves). Persisted, so never a monotonic clock. */
+    val savedAtMs: Long = 0L,
   )
 
   fun nativeJson(q: NativeQueue): JSONObject {
@@ -143,7 +145,14 @@ object NativeStateCodec {
       .put("nextRound", JSONArray(c.nextRound))
       .put("heard", JSONArray(c.heard))
       .put("played", JSONArray(c.played.takeLast(MAX_QUEUE)))
+      .put("savedAt", q.savedAtMs)
   }
+
+  /** SESSION-PLAYED-001: audio stopped longer than this ends the session (the page's SESSION-RESET-001 window). */
+  const val IDLE_LIMIT_MS = 4 * 60_000L
+
+  /** True when audio stopped more than [IDLE_LIMIT_MS] before [nowMs]. Exactly the limit is still the same session; unknown stop time is not. */
+  fun isNewSession(savedAtMs: Long, nowMs: Long): Boolean = savedAtMs > 0 && nowMs - savedAtMs > IDLE_LIMIT_MS
 
   /** Every saved entry comes back (none is silently dropped); an invalid state as a whole is null. */
   fun nativeOf(o: JSONObject, sourceAllowed: (String) -> Boolean): NativeQueue? {
@@ -161,7 +170,7 @@ object NativeStateCodec {
       o.optInt("index", -1), repeat, o.optBoolean("shuffle", false), keys("order"), keys("nextRound"), keys("heard"),
       keys("played"),
     )
-    return NativeQueue(entries, control, o.optLong("positionMs", 0).coerceAtLeast(0))
+    return NativeQueue(entries, control, o.optLong("positionMs", 0).coerceAtLeast(0), o.optLong("savedAt", 0).coerceAtLeast(0))
   }
 
   /**

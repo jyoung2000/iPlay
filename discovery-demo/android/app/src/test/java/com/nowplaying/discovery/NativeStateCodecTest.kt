@@ -174,6 +174,20 @@ class NativeStateCodecTest {
     assertFalse(strict.entries[0].second.ready)
   }
 
+  @Test fun aSaveRemembersWhenAudioStoppedAndAStaleOneStartsANewSession() {
+    val entries = listOf("a" to NativeStateCodec.songOf(song("a"), allowed)!!)
+    val control = PlayQueue.Control(0, PlayQueue.Repeat.OFF, true, listOf("a"), listOf("a"), listOf("a"), listOf("a"))
+    val json = NativeStateCodec.nativeJson(NativeStateCodec.NativeQueue(entries, control, 0, 1_000_000L))
+    val back = NativeStateCodec.nativeOf(json, allowed)!!
+    assertEquals(1_000_000L, back.savedAtMs)
+    assertEquals(listOf("a"), back.control.played)
+    // SESSION-PLAYED-001: exactly the idle limit is still the same session; past it is a new one.
+    assertFalse(NativeStateCodec.isNewSession(1_000_000L, 1_000_000L + NativeStateCodec.IDLE_LIMIT_MS))
+    assertTrue(NativeStateCodec.isNewSession(1_000_000L, 1_000_000L + NativeStateCodec.IDLE_LIMIT_MS + 1))
+    // An unknown stop time (an older save) never starts a new session by itself.
+    assertFalse(NativeStateCodec.isNewSession(0L, Long.MAX_VALUE))
+  }
+
   @Test fun invalidNativeStateIsRefusedWhole() {
     val s = NativeStateCodec.Store(MapIo())
     val q = JSONArray().put(JSONObject().put("mediaId", "a").put("song", song("a")))

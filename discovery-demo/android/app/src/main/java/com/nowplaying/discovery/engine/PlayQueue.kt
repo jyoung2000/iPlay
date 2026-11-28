@@ -154,6 +154,14 @@ class PlayQueue<T>(
       "firstRound=$firstRound orderDistinct=$inOrder nextRound=${nextRound.size} heard=${heard.size}"
   }
 
+  /** SESSION-PLAYED-001: a new listening session forgets what played before; the song now current counts as its first. */
+  fun newSession() {
+    sessionPlayed.clear()
+    heard.clear()
+    current?.let { sessionPlayed += identityOf(it); heard += identityOf(it) }
+    version++
+  }
+
   fun control(): Control = Control(
     index, repeat, shuffle,
     order.map { identityOf(items[it]) }, nextRound.map { identityOf(items[it]) }, heard.toList(),

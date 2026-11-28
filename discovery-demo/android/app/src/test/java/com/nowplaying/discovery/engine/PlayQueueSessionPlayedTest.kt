@@ -81,6 +81,20 @@ class PlayQueueSessionPlayedTest {
     assertEquals(listOf("a"), q.control().played)
   }
 
+  @Test fun aNewSessionForgetsEarlierPlaysButTheCurrentSongCountsAsPlayed() {
+    for (seed in 1..60) {
+      val q = queue(seed)
+      q.set(listOf("a", "b", "c"), 0)
+      q.advance(pressed = true)
+      q.advance(pressed = true)
+      val before = q.current!!
+      q.newSession()
+      assertEquals("seed $seed: the song now current is the only one played this session", listOf(before), q.control().played)
+      assertEquals("seed $seed: and the only one heard this round", listOf(before), q.control().heard)
+      assertEquals("seed $seed: the current song does not change", before, q.current)
+    }
+  }
+
   @Test fun automaticAdvanceStopsAtTheEndOfAShuffledRoundButNextOpensTheNextOne() {
     for (seed in 1..60) {
       val q = queue(seed)
