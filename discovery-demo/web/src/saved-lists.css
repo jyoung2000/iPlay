@@ -163,10 +163,16 @@
     min-height: 44px;
     padding: 0;
   }
-  /* The per-song badge is the first thing to go when the row is tight; the list's own summary
-     above still says how many are left to play. */
+  /* PLAYLIST-PLAYED-001 (owner, 2026-11-28): "has similar ui and ux to the discover now playing song
+     queue". This badge used to be dropped below 480px, so a playlist on a phone showed no play state at
+     all while the Discover queue showed it on every row. It stays at every width; the row's grid gives it
+     its own column beside the title, and it is short enough not to squeeze the words. */
   .tracks--saved .track__played {
-    display: none;
+    font-size: 9px;
+    letter-spacing: 0.03em;
+    max-width: 5.5em;
+    text-align: right;
+    line-height: 1.2;
   }
 }
 /* The save menu drops below the song it belongs to, across the whole row. */

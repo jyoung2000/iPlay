@@ -246,6 +246,8 @@ class EnginePlayer(
    */
   fun pageLoad(song: MediaHub.Song, mediaId: String?, positionMs: Long, play: Boolean, pageRev: Int) {
     leaveRadio()
+    // CAR-SKIP-003: the page answered (a forwarded press, or a choice of its own); the queue's fallback stands down.
+    pageLoads++
     val id = mediaId ?: song.id
     val current = queue.current
     Log.i(TAG, "page load ${song.id.take(60)} link=${song.source != null} play=$play rev=$pageRev/$rev")
@@ -425,9 +427,26 @@ class EnginePlayer(
    * ([PlayQueue.roundTimeline]), so Android Auto sees a window after the song playing exactly while
    * this app can really move on. In the list's own order (shuffle off) the list is the play order
    * already, and the car shows the queue as the listener wrote it.
+   *
+   * CAR-SKIP-003: with the round played through, a press is still answerable — the mood top-up finds
+   * more songs and plays the first one — so one window stays published rather than letting the car
+   * decide for itself that this app is finished. [answerable] is that promise, and nothing else.
    */
   private fun shownOrder(): List<Int> =
-    if (queue.shuffle && !radioLive) queue.roundTimeline(::canFetch) else queue.items.indices.toList()
+    if (queue.shuffle && !radioLive) queue.roundTimeline(::canFetch, keepNext = answerable())
+    // Shuffle off, the list IS the play order and the car shows it as the listener wrote it; the car
+    // only runs out of a next window on the list's very last row, which is not what hours of Discover
+    // listening reaches (Discover shuffles). Re-ordering it here would move played songs above the
+    // song playing, so the list is published untouched.
+    else queue.items.indices.toList()
+
+  /**
+   * CAR-SKIP-003: whether a Next press this app cannot play from the queue can still be answered by
+   * finding more songs (AA-NEXT-DRY-001). Only then may the published timeline promise the car a
+   * window it has no song for yet. With a live page the promise is kept by the fallback in [skip]:
+   * a press the page does not answer is answered by the queue, top-up included.
+   */
+  private fun answerable(): Boolean = !radioLive && onQueueDry != null && queue.items.size > 1
 
   override fun getState(): State {
     val snap = engine.snapshot
@@ -545,7 +564,9 @@ class EnginePlayer(
    * playing, which carries on. A live page owns the queue and sends its own list, so nothing here.
    */
   fun appendFound(songs: List<MediaHub.Song>): Int {
-    if (pageLive) return 0
+    // CAR-SKIP-003: a press the page did not answer became the queue's own (it owes a Next), so the songs found for it
+    // must reach the queue even with the page live — otherwise that press is dropped after all.
+    if (pageLive && owedNextFrom == null) return 0
     val have = queue.items.map { it.mediaId }.toSet()
     val add = songs.filter { it.id !in have }.map { Entry(MediaHub.sourced(it)) }
     if (add.isEmpty()) return 0
@@ -753,7 +774,35 @@ class EnginePlayer(
 
   /** Next/Previous from a controller: the page's call while it is awake, the queue's otherwise. */
   private fun skip(forward: Boolean) {
-    if (pageLive) { page?.command(JSONObject().put("type", if (forward) "next" else "prev")); return }
+    if (pageLive) {
+      // CAR-SKIP-003 (owner, 2026-11-28): "ensure the skip button always works on android auto". Forwarding the press
+      // to the page is a hand-off with no answer owed: a page whose own round is all heard, whose top-up is stuck, or
+      // whose script is wedged simply drops it, and the car's Next looks broken. So the press is remembered, and if
+      // the page has neither loaded a song nor changed the queue by [PAGE_PRESS_MS], the queue answers it instead —
+      // including the mood top-up when the queue has nothing left either.
+      val turn = ++pagePress
+      val from = queue.current?.song?.id
+      val version = queue.version
+      val loads = pageLoads
+      page?.command(JSONObject().put("type", if (forward) "next" else "prev"))
+      main.postDelayed({
+        if (turn != pagePress) return@postDelayed // a newer press owns the answer
+        if (pageLoads != loads || queue.version != version || queue.current?.song?.id != from) return@postDelayed
+        Log.i(TAG, "${if (forward) "next" else "prev"}: the page did not answer ${from?.take(60)} in ${PAGE_PRESS_MS}ms; the queue answers it")
+        queueSkip(forward)
+      }, PAGE_PRESS_MS)
+      return
+    }
+    queueSkip(forward)
+  }
+
+  /** CAR-SKIP-003: how long a press forwarded to the page may go unanswered before the queue answers it. */
+  private var pagePress = 0
+  /** CAR-SKIP-003: counts the songs the page asked for, so an answered press can be told from a dropped one. */
+  private var pageLoads = 0
+
+  /** The queue's own answer to a Next/Previous press. */
+  private fun queueSkip(forward: Boolean) {
     val from = queue.current?.song?.id
     val heard = heardNow()
     val cued = cue?.takeIf { forward && cueFor == from }
@@ -1252,6 +1301,12 @@ class EnginePlayer(
     private const val MAX_LOG = 64
     /** Renewed on every play; a safety net, not a playback limit. */
     private const val WAKE_TIMEOUT_MS = 6 * 60 * 60 * 1000L
+    /**
+     * CAR-SKIP-003: how long a Next/Previous press forwarded to the page may go unanswered before the queue answers
+     * it. Long enough that a page choosing and opening a song is never overruled (its own load lands first), short
+     * enough that the car's button never feels dead.
+     */
+    private const val PAGE_PRESS_MS = 1200L
     private val COMMANDS = Player.Commands.Builder()
       .addAll(
         Player.COMMAND_PLAY_PAUSE,

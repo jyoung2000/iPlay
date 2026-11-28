@@ -175,7 +175,7 @@ class PlayQueue<T>(
    * streamed ([advanceFetchable]); everything else sits behind the song playing, where it cannot
    * promise the car a next song this round has no intention of playing.
    */
-  fun roundTimeline(canFollow: (T) -> Boolean = { false }): List<Int> {
+  fun roundTimeline(canFollow: (T) -> Boolean = { false }, keepNext: Boolean = false): List<Int> {
     val at = index
     val drawn = order.filter { it in items.indices }
     val seen = drawn.toHashSet()
@@ -185,7 +185,18 @@ class PlayQueue<T>(
     fun reachable(i: Int) = i != at &&
       !playedThisRound(i) &&
       (isPlayable(items[i]) || canFollow(items[i]))
-    val ahead = all.filter(::reachable)
+    val ahead = all.filter(::reachable).toMutableList()
+    // CAR-SKIP-003 (owner, 2026-11-28): "ensure the skip button always works on android auto ... after hours of
+    // listening on discover the skip button no longer works". With every song of the round played, nothing is ahead
+    // and the car drops Next itself, for good. The app can still answer that press — it finds more songs for the
+    // listening mood and plays the first one (AA-NEXT-DRY-001) — so while a caller can answer, one window stays
+    // published after the song playing. It changes nothing about what plays automatically ([findNext] is untouched):
+    // the window is the song a fresh round would open with, so the car's queue view stays truthful.
+    if (keepNext && ahead.isEmpty() && at in items.indices) {
+      val window = peekAfterEnd()?.takeIf { it != at }
+        ?: all.firstOrNull { it != at && (isPlayable(items[it]) || canFollow(items[it])) }
+      if (window != null) ahead += window
+    }
     val aheadSet = ahead.toHashSet()
     val behind = all.filter { it != at && it !in aheadSet }
     return if (at in items.indices) behind + at + ahead else behind + ahead
