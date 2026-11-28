@@ -816,8 +816,8 @@ class EnginePlayer(
     if (fetching) moved = true
     if (!moved) {
       // SHUFFLE-STAY-001: say why a press found nothing, so a stalled car Next can be told from a missing file.
-      if (forward) Log.i(TAG, "next: nothing to follow ${from?.take(60)} at ${queue.index} (shuffle=${queue.shuffle}, once=${queue.playsOnce}, repeat=${queue.repeat}) " +
-        queue.items.joinToString { "${it.song.id.take(40)}[r=${it.song.ready},h=${it.song.heard},s=${it.song.source != null}]" })
+      if (forward) Log.i(TAG, "next: nothing to follow ${from?.take(60)} at ${queue.index} (shuffle=${queue.shuffle}, playsOnce=${queue.playsOnce}, repeat=${queue.repeat}) " +
+        queue.stallSummary())
       // AA-NEXT-DRY-001: nothing unheard is left at all. Find more for the listening mood; the first found song is
       // this press's answer (appendFound moves on to it), so Next is never silently dead.
       if (forward && onQueueDry != null) { owedNextFrom = from; onQueueDry?.invoke() }

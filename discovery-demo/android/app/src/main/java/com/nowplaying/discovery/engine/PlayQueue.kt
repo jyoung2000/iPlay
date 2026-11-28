@@ -128,6 +128,20 @@ class PlayQueue<T>(
     val heard: List<String>,
   )
 
+  /**
+   * Counts only, for a stalled Next: the log truncates long item lists, so these say why nothing is open.
+   * open = playable and not yet played this round (the set findNext draws from).
+   */
+  fun stallSummary(): String {
+    val playable = items.indices.count { isPlayable(items[it]) }
+    val open = items.indices.count { isPlayable(items[it]) && !playedThisRound(it) }
+    val inHeard = items.indices.count { identityOf(items[it]) in heard }
+    val held = if (firstRound) items.indices.count { heardBefore(items[it]) } else 0
+    val inOrder = order.toHashSet().size
+    return "items=${items.size} playable=$playable open=$open inHeard=$inHeard heldByHeardBefore=$held " +
+      "firstRound=$firstRound orderDistinct=$inOrder nextRound=${nextRound.size} heard=${heard.size}"
+  }
+
   fun control(): Control = Control(
     index, repeat, shuffle,
     order.map { identityOf(items[it]) }, nextRound.map { identityOf(items[it]) }, heard.toList(),
