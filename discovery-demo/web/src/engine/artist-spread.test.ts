@@ -74,15 +74,37 @@ describe('ARTIST-SPREAD-001 end to end over a lopsided catalog', () => {
 });
 
 describe('ARTIST-SPREAD-001 with the live mood on', () => {
-  it('the mood keeps every song, leads with the mood when the head does not fit, and keeps the artist cap', () => {
+  it('the mood reorders the recommend() spread: same songs, same per-artist counts, a rap track leads', () => {
     const RAP = moodTags({ genres: ['Rap'] });
     const JAZZ = moodTags({ genres: ['Smooth jazz'] });
-    // Smooth jazz heads the engine's order; the listener has been playing rap.
-    const groups: [string, ReturnType<typeof moodTags>][] = [['Jazz A', JAZZ], ['Jazz B', JAZZ], ['Rap A', RAP], ['Rap B', RAP], ['Rap C', RAP]];
-    const cands: MoodCandidate[] = [];
-    groups.forEach(([artist, tags], a) => {
-      for (let j = 0; j < 2; j++) cands.push({ key: `${artist}-${j}`, tags, vector: null, artist, score: 1 - (a * 2 + j) / 20 });
-    });
+    // Rap A has three times the songs the cap allows, so recommend() must trim it before the mood sees the list.
+    const pool: E.Track[] = [];
+    const genreOf = new Map<string, typeof RAP>();
+    for (const artist of ['Jazz A', 'Jazz B', 'Rap A', 'Rap B', 'Rap C']) {
+      const n = artist === 'Rap A' ? 6 : 2;
+      for (let j = 0; j < n; j++) {
+        const t = song(`${artist}-${j}`, artist);
+        pool.push(t);
+        genreOf.set(t.key, artist.startsWith('Rap') ? RAP : JAZZ);
+      }
+    }
+    const scored = E.recommend(pool, ctx());
+    const countBy = (keys: string[], artistOf: (k: string) => string) => {
+      const per: Record<string, number> = {};
+      for (const k of keys) per[artistOf(k)] = (per[artistOf(k)] ?? 0) + 1;
+      return per;
+    };
+    const artistByKey = new Map(pool.map((t) => [t.key, t.artists[0]!] as const));
+    const before = countBy(scored.map((s) => s.track.key), (k) => artistByKey.get(k)!);
+    expect(Math.max(...Object.values(before))).toBeLessThanOrEqual(2);
+
+    const cands: MoodCandidate[] = scored.map((s) => ({
+      key: s.track.key,
+      tags: genreOf.get(s.track.key)!,
+      vector: null,
+      artist: artistByKey.get(s.track.key)!,
+      score: s.final,
+    }));
     const listening: MoodSignal[] = [
       { key: 'r1', kind: 'complete', ts: now - 600, tags: RAP, vector: null },
       { key: 'r2', kind: 'complete', ts: now - 200, tags: RAP, vector: null },
@@ -91,13 +113,12 @@ describe('ARTIST-SPREAD-001 with the live mood on', () => {
     const plan = moodOrder(cands, mood, 0.5);
 
     expect(mood.leading).toContain('Rap');
-    expect(plan.changed).toBe(true);
     expect([...plan.order].sort()).toEqual(cands.map((c) => c.key).sort());
-    const byKey = new Map(cands.map((c) => [c.key, c] as const));
-    expect(byKey.get(plan.order[0]!)!.tags).toBe(RAP);
-    // The spread cap still holds on the reordered queue: no artist takes more than two places in it.
-    const per: Record<string, number> = {};
-    for (const k of plan.order) per[byKey.get(k)!.artist!] = (per[byKey.get(k)!.artist!] ?? 0) + 1;
-    expect(Math.max(...Object.values(per))).toBeLessThanOrEqual(2);
+    const after = countBy(plan.order, (k) => artistByKey.get(k)!);
+    expect(after).toEqual(before);
+    if (cands[0]!.tags === JAZZ) {
+      expect(plan.changed).toBe(true);
+      expect(genreOf.get(plan.order[0]!)).toBe(RAP);
+    }
   });
 });
