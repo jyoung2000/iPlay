@@ -188,6 +188,14 @@ class NativeStateCodecTest {
     assertFalse(NativeStateCodec.isNewSession(0L, Long.MAX_VALUE))
   }
 
+  @Test fun aSaveWhileStoppedKeepsWhenAudioStoppedAndAPlayingSaveUsesNow() {
+    assertEquals(5_000L, NativeStateCodec.stopTimeToSave(5_000L, 900_000L))
+    assertEquals(900_000L, NativeStateCodec.stopTimeToSave(0L, 900_000L))
+    // A stopped queue saved again ten minutes later still reads as a long pause.
+    val saved = NativeStateCodec.stopTimeToSave(5_000L, 5_000L + 10 * 60_000L)
+    assertTrue(NativeStateCodec.isNewSession(saved, 5_000L + 10 * 60_000L))
+  }
+
   @Test fun invalidNativeStateIsRefusedWhole() {
     val s = NativeStateCodec.Store(MapIo())
     val q = JSONArray().put(JSONObject().put("mediaId", "a").put("song", song("a")))

@@ -166,6 +166,7 @@ class EnginePlayer(
   private var playWhenReady = false
   /** Wall-clock ms audio last stopped (0 while it plays or never stopped); a long gap starts a new session. */
   private var idleSince = 0L
+  private fun savedAtMs(): Long = NativeStateCodec.stopTimeToSave(idleSince, System.currentTimeMillis())
   private var ended = false
   private var error: PlaybackException? = null
   /** Bumped whenever the current song changes, so a slow open for an old song is dropped. */
@@ -392,7 +393,7 @@ class EnginePlayer(
 
   /** NATIVE-COLD-STATE-001: the queue, its shuffle round and the native millisecond position, to save. */
   fun nativeState(): JSONObject = NativeStateCodec.nativeJson(
-    NativeStateCodec.NativeQueue(queue.items.map { it.mediaId to it.song }, queue.control(), positionMs(engine.snapshot), System.currentTimeMillis()),
+    NativeStateCodec.NativeQueue(queue.items.map { it.mediaId to it.song }, queue.control(), positionMs(engine.snapshot), savedAtMs()),
   )
 
   /**
@@ -767,7 +768,7 @@ class EnginePlayer(
     if (play && !requestFocus()) return
     // Car, lock-screen, focus and noisy-device controls share the phone radio pause state.
     // SESSION-PLAYED-001: audio stopped longer than the session window ends the session; playing again starts a new one.
-    if (!play) idleSince = System.currentTimeMillis()
+    if (!play) { if (idleSince == 0L) idleSince = System.currentTimeMillis() } // a repeated pause keeps the first stop time
     else { if (NativeStateCodec.isNewSession(idleSince, System.currentTimeMillis())) queue.newSession(); idleSince = 0L }
     if (radioLive) com.nowplaying.discovery.RadioNative.session?.paused = !play
     playWhenReady = play

@@ -154,6 +154,13 @@ object NativeStateCodec {
   /** True when audio stopped more than [IDLE_LIMIT_MS] before [nowMs]. Exactly the limit is still the same session; unknown stop time is not. */
   fun isNewSession(savedAtMs: Long, nowMs: Long): Boolean = savedAtMs > 0 && nowMs - savedAtMs > IDLE_LIMIT_MS
 
+  /**
+   * The stop time a save records: when audio stopped if it is stopped, else now (a save while playing is
+   * the latest moment audio was known to play, so a process killed mid-song counts from its last save).
+   * Saving again while stopped must not move the stop time forward and hide a long pause.
+   */
+  fun stopTimeToSave(idleSinceMs: Long, nowMs: Long): Long = if (idleSinceMs > 0) idleSinceMs else nowMs
+
   /** Every saved entry comes back (none is silently dropped); an invalid state as a whole is null. */
   fun nativeOf(o: JSONObject, sourceAllowed: (String) -> Boolean): NativeQueue? {
     if (!validNative(o)) return null
