@@ -196,6 +196,17 @@ class NativeStateCodecTest {
     assertTrue(NativeStateCodec.isNewSession(saved, 5_000L + 10 * 60_000L))
   }
 
+  @Test fun aNewSessionOpensAtTheStartOfTheSongAndTheSameSessionWhereItStopped() {
+    val stopped = 1_000_000L
+    val sameSession = stopped + NativeStateCodec.IDLE_LIMIT_MS
+    val newSession = stopped + NativeStateCodec.IDLE_LIMIT_MS + 1
+    // SESSION-RESET-001: back after more than four minutes stopped opens the song at 0:00.
+    assertEquals(0L, NativeStateCodec.restorePositionMs(stopped, 61_000L, newSession))
+    assertEquals(61_000L, NativeStateCodec.restorePositionMs(stopped, 61_000L, sameSession))
+    // An older save with no stop time keeps its place.
+    assertEquals(61_000L, NativeStateCodec.restorePositionMs(0L, 61_000L, Long.MAX_VALUE))
+  }
+
   @Test fun invalidNativeStateIsRefusedWhole() {
     val s = NativeStateCodec.Store(MapIo())
     val q = JSONArray().put(JSONObject().put("mediaId", "a").put("song", song("a")))

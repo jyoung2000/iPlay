@@ -161,6 +161,13 @@ object NativeStateCodec {
    */
   fun stopTimeToSave(idleSinceMs: Long, nowMs: Long): Long = if (idleSinceMs > 0) idleSinceMs else nowMs
 
+  /**
+   * SESSION-RESET-001: where a restored song opens. A new session opens it at its beginning; within the
+   * session it opens where the audio stopped. A save with no stop time keeps its place.
+   */
+  fun restorePositionMs(savedAtMs: Long, positionMs: Long, nowMs: Long): Long =
+    if (isNewSession(savedAtMs, nowMs)) 0L else positionMs
+
   /** Every saved entry comes back (none is silently dropped); an invalid state as a whole is null. */
   fun nativeOf(o: JSONObject, sourceAllowed: (String) -> Boolean): NativeQueue? {
     if (!validNative(o)) return null

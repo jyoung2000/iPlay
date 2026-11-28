@@ -406,11 +406,13 @@ class EnginePlayer(
     val q = NativeStateCodec.nativeOf(saved, sourceAllowed)?.takeIf { it.entries.isNotEmpty() } ?: return false
     queue.restore(q.entries.map { (m, s) -> Entry(s, m) }, q.control)
     // SESSION-PLAYED-001: a restore long after the audio stopped is a new session.
-    if (NativeStateCodec.isNewSession(q.savedAtMs, System.currentTimeMillis())) queue.newSession()
+    val now = System.currentTimeMillis()
+    if (NativeStateCodec.isNewSession(q.savedAtMs, now)) queue.newSession()
     idleSince = q.savedAtMs
     engine.setRepeatOne(queue.repeatsSong)
+    // SESSION-RESET-001: a new session opens the song paused at its beginning, not where it stopped.
     playWhenReady = false
-    pendingStartMs = q.positionMs
+    pendingStartMs = NativeStateCodec.restorePositionMs(q.savedAtMs, q.positionMs, now)
     ended = false
     error = null
     restored = true
