@@ -92,24 +92,39 @@ export function tasteArtists(colours: readonly Colour[], want = 6, cursor = 0): 
 }
 
 /**
- * The artists a run with no starting song begins from: the listener's stars, then what their listening
- * says, then their taste map's colours — each source only filling what the one before left.
+ * The artists a run with no starting song begins from: the listener's stars, what their listening says and
+ * their taste map's colours — each source takes a turn in turn (ARTIST-SPREAD-001), so the stars lead but
+ * cannot crowd the other two out.
  */
 export function coldStarters(
   input: { starred: readonly string[]; rows: readonly ColdRow[]; colours: readonly Colour[]; now: number; cursor?: number },
   want = 6,
 ): ColdStarter[] {
+  // ARTIST-SPREAD-001: one turn per source per lap, stars first. A long list of stars can no longer fill the
+  // whole start and leave the listening and taste sources out.
   const out: ColdStarter[] = [];
   const seen = new Set<string>();
-  const take = (name: string, from: ColdStarter['from']) => {
-    const key = fold(name);
-    if (!key || seen.has(key) || out.length >= want) return;
-    seen.add(key);
-    out.push({ name, from });
-  };
-  for (const s of input.starred) take(s, 'starred');
-  for (const a of listeningArtists(input.rows, input.now, want)) take(a, 'listening');
-  for (const a of tasteArtists(input.colours, want, input.cursor ?? 0)) take(a, 'taste');
+  const lanes: { from: ColdStarter['from']; names: string[]; at: number }[] = [
+    { from: 'starred', names: [...input.starred], at: 0 },
+    { from: 'listening', names: listeningArtists(input.rows, input.now, want), at: 0 },
+    { from: 'taste', names: tasteArtists(input.colours, want, input.cursor ?? 0), at: 0 },
+  ];
+  let progressed = true;
+  while (out.length < want && progressed) {
+    progressed = false;
+    for (const lane of lanes) {
+      while (lane.at < lane.names.length) {
+        const name = lane.names[lane.at++] as string;
+        const key = fold(name);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        out.push({ name, from: lane.from });
+        progressed = true;
+        break;
+      }
+      if (out.length >= want) break;
+    }
+  }
   return out;
 }
 
@@ -118,11 +133,13 @@ export function coldReason(starters: readonly ColdStarter[]): string {
   if (!starters.length) return '';
   const names = starters.slice(0, 3).map((s) => s.name);
   const list = names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
-  const kinds = new Set(starters.map((s) => s.from));
-  const where = kinds.has('starred')
-    ? kinds.size > 1 ? 'your starred artists and your listening' : 'your starred artists'
-    : kinds.has('listening')
-      ? kinds.has('taste') ? 'your listening and your sound' : 'your listening'
-      : 'your sound';
+  // ARTIST-SPREAD-001: name each source that was really used, in the order the run took them.
+  const label: Record<ColdStarter['from'], string> = {
+    starred: 'your starred artists',
+    listening: 'your listening',
+    taste: 'your sound',
+  };
+  const parts = [...new Set(starters.map((s) => label[s.from]))];
+  const where = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
   return `Started from ${where}: ${list}.`;
 }
